@@ -23,7 +23,8 @@ const DEFAULT_CLASS_TYPES: ClassType[] = ['一对一', '一对二', '一对三',
 
 function getRoute(): Route {
   if (typeof window === 'undefined') return 'student';
-  return window.location.hash.includes('teacher') ? 'teacher' : 'student';
+  const authRoute = new URLSearchParams(window.location.search).get('auth');
+  return window.location.hash.includes('teacher') || authRoute === 'teacher' ? 'teacher' : 'student';
 }
 
 const normalizeTeacherState = (): AppState => emptyAppState();
@@ -224,7 +225,9 @@ export default function App() {
       return;
     }
     setLoading(true);
-    const redirectTo = `${window.location.origin}${window.location.pathname}#/teacher`;
+    // Supabase appends its access token as a URL fragment. Keep the teacher
+    // destination in the query string so it cannot collide with our hash route.
+    const redirectTo = `${window.location.origin}${window.location.pathname}?auth=teacher`;
     const { error } = await client.auth.signInWithOtp({
       email: teacherEmail.trim(),
       options: { emailRedirectTo: redirectTo },
