@@ -480,7 +480,7 @@ export function StudentPortal({
             </p>
             <p>
               <strong>已设置课程：</strong>
-              {draft.courses.length} 条
+              {draft.courses.filter((course) => course.title.trim().length > 0 && course.start !== course.end).length} 条
             </p>
             <p>
               <strong>目标班级人数：</strong>
