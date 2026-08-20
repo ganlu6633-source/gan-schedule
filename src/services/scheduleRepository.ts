@@ -170,7 +170,7 @@ const mapStudent = (row: DbRow): Student => {
     availability: buildAvailability(row.availability),
     originalCourses: mapCourses(row.commitments),
     acceptedLocationIds: asStringArray(row.location_preferences),
-    notes: asString(row.notes) || undefined,
+    notes: asString(metadata.notes) || undefined,
     weeklySessionNeed: asNumber(row.weekly_sessions),
     lessonMinutes: asNumber(row.session_minutes),
     active: row.active !== false,
@@ -395,8 +395,8 @@ const studentRow = (student: Student) => ({
     ...student.metadata,
     classType: student.classType,
     teacherClassNote: student.teacherClassNote || null,
+    notes: student.notes?.trim() || null,
   },
-  notes: student.notes?.trim() || null,
   updated_at: nowIso(),
 });
 
