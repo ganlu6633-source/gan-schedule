@@ -4,6 +4,7 @@ import { StudentPortal } from './components/StudentPortal';
 import { TeacherPortal } from './components/TeacherPortal';
 import { createUuid } from './utils/id';
 import {
+  authenticateStudentSchedule,
   checkTeacherCanAccess,
   emptyAppState,
   getAuthClient,
@@ -31,6 +32,7 @@ const normalizeTeacherState = (): AppState => emptyAppState();
 
 const toStudentFromPayload = (payload: StudentSubmissionPayload, studentId = createUuid()): Student => ({
   id: studentId,
+  chemStudentId: payload.chemStudentId,
   name: payload.name,
   grade: payload.grade,
   contact: payload.contact,
@@ -69,6 +71,7 @@ const mergeSubmissionStudent = (target: Student, payload: StudentSubmissionPaylo
 
   return {
     ...target,
+    chemStudentId: target.chemStudentId || payload.chemStudentId,
     contact: target.contact || payload.contact,
     teacherClassNote: target.teacherClassNote || payload.teacherClassNote,
     school: target.school || payload.school,
@@ -252,11 +255,11 @@ export default function App() {
     setLoading(false);
   };
 
-  const submitStudent = async (payload: StudentSubmissionPayload) => {
+  const submitStudent = async (payload: StudentSubmissionPayload, sessionToken: string) => {
     if (!payload.name || !payload.grade) {
       throw new Error('姓名和年级为必填项');
     }
-    const result = await submitStudentDraft(payload);
+    const result = await submitStudentDraft(payload, sessionToken);
     setFeedback('学生提交已成功写入云端，教师将在待处理提交中看到这条记录。');
     return result;
   };
@@ -270,6 +273,18 @@ export default function App() {
     const target = state.pendingSubmissions.find((item) => item.id === submissionId);
     if (!target) {
       setFeedback('提交不存在或已处理。');
+      return;
+    }
+    const identityMatch = target.payload.chemStudentId
+      ? state.students.find((student) => student.chemStudentId === target.payload.chemStudentId)
+      : undefined;
+    if (!forceCreate && identityMatch) {
+      const students = state.students.map((student) =>
+        student.id === identityMatch.id ? mergeSubmissionStudent(student, target.payload) : student
+      );
+      await persistTeacherResult({ ...state, students });
+      await markAndSync(submissionId, 'accepted');
+      setFeedback(`已匹配复习系统学生并更新排课资料：「${target.payload.name}」。`);
       return;
     }
     const hasSameName = state.students.some((student) => normalizeStudentName(student.name) === normalizeStudentName(target.payload.name));
@@ -480,7 +495,7 @@ export default function App() {
       {feedback && <p className="tiny">{feedback}</p>}
 
       {route === 'student' ? (
-        <StudentPortal state={state} classTypeOptions={classTypeOptions} onSubmit={submitStudent} />
+        <StudentPortal state={state} onAuthenticate={authenticateStudentSchedule} onSubmit={submitStudent} />
       ) : teacherAllowed ? (
         <TeacherPortal
           state={state}

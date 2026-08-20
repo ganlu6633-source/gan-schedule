@@ -10,6 +10,7 @@ import {
   OptimizerSettings,
   ScheduleRun,
   Student,
+  StudentLoginResult,
   StudentOriginalCourse,
   StudentSubmissionPayload,
   TeacherCourse,
@@ -159,6 +160,7 @@ const mapStudent = (row: DbRow): Student => {
   const metadata = asRecord(row.metadata);
   return {
     id: asString(row.id),
+    chemStudentId: asString(row.chem_student_id) || undefined,
     name: asString(row.display_name),
     grade: asString(row.grade_band),
     contact: asString(row.contact) || undefined,
@@ -191,6 +193,7 @@ const mapSubmission = (row: DbRow): IntakeSubmission => {
     courseNeed: asString(row.course_need) || undefined,
   };
   const payload: StudentSubmissionPayload = {
+    chemStudentId: asString(row.chem_student_id) || undefined,
     name: asString(row.student_name),
     grade: asString(row.grade_band),
     contact: asString(row.contact) || undefined,
@@ -376,6 +379,7 @@ const locationRow = (location: Location) => ({
 
 const studentRow = (student: Student) => ({
   id: student.id,
+  chem_student_id: student.chemStudentId || null,
   display_name: student.name.trim(),
   normalized_name: normalizeName(student.name),
   grade_band: student.grade.trim() || null,
@@ -489,32 +493,37 @@ export async function verifyTeacherWorkspaceAccess(): Promise<{ ok: boolean; che
   return { ok: checks.every((item) => item.ok), checks };
 }
 
-export async function submitStudentDraft(payload: StudentSubmissionPayload): Promise<{ id: string }> {
-  if (!client) throw new Error('Supabase 正式环境变量未配置，不能提交。');
-  const form = await loadStudentFormConfig();
-  const formKey = asString(form.raw.form_key);
-  if (!formKey) throw new Error('公开表单配置不完整，缺少 form_key。');
-  const { error } = await client.from('sched_intake_submissions').insert({
-    form_key: formKey,
-    student_name: payload.name.trim(),
-    normalized_name: normalizeName(payload.name),
-    grade_band: payload.grade.trim() || null,
-    school: payload.school?.trim() || null,
-    contact: payload.contact?.trim() || null,
-    course_need: payload.courseNeed?.trim() || payload.teacherClassNote?.trim() || null,
-    class_mode: dbClassMode(payload.classType),
-    weekly_sessions: Math.max(1, Math.min(7, payload.weeklySessionNeed || 1)),
-    session_minutes: validSessionMinutes(payload.lessonMinutes),
-    target_group_size: payload.targetStudentCount ? Math.max(1, Math.min(12, payload.targetStudentCount)) : null,
-    availability: payload.availability,
-    commitments: payload.originalCourses,
-    location_preferences: unique(payload.acceptedLocationIds),
-    overall_flexibility: submissionFlexibility(payload),
-    notes: payload.notes?.trim() || null,
-    status: 'new',
+async function studentAccessRequest<T>(body: Record<string, unknown>, sessionToken?: string): Promise<T> {
+  if (!SUPABASE_URL || !SUPABASE_KEY) throw new Error('Supabase 正式环境变量未配置。');
+  const response = await fetch(`${SUPABASE_URL}/functions/v1/chemistry-schedule-access`, {
+    method: 'POST',
+    headers: {
+      apikey: SUPABASE_KEY,
+      Authorization: `Bearer ${SUPABASE_KEY}`,
+      'Content-Type': 'application/json',
+      ...(sessionToken ? { 'x-app-session': sessionToken } : {}),
+    },
+    body: JSON.stringify(body),
   });
-  ensureNoError('提交学生信息', error);
-  return { id: 'server-accepted' };
+  const result = (await response.json().catch(() => ({}))) as { error?: string } & T;
+  if (!response.ok) throw new Error(result.error || '学生身份服务暂时不可用，请稍后重试。');
+  return result;
+}
+
+export async function authenticateStudentSchedule(name: string, code: string): Promise<StudentLoginResult> {
+  return studentAccessRequest<StudentLoginResult>({ action: 'login', name: name.trim(), code: code.trim() });
+}
+
+export async function submitStudentDraft(payload: StudentSubmissionPayload, sessionToken: string): Promise<{ id: string }> {
+  if (!sessionToken) throw new Error('登录已失效，请重新输入姓名和登录码。');
+  return studentAccessRequest<{ id: string }>({
+    action: 'submit',
+    data: {
+      chemStudentId: payload.chemStudentId,
+      commitments: payload.originalCourses,
+      notes: payload.notes || '',
+    },
+  }, sessionToken);
 }
 
 export async function loadPendingSubmissions(): Promise<IntakeSubmission[]> {

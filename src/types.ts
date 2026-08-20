@@ -57,6 +57,7 @@ export interface StudentOriginalCourse extends CourseBase {
 
 export interface Student {
   id: string;
+  chemStudentId?: string;
   name: string;
   grade: string;
   contact?: string;
@@ -150,6 +151,31 @@ export interface TravelTime {
   bufferMinutes?: number;
 }
 
+export interface StudentScheduleProfile {
+  chemStudentId: string;
+  scheduleStudentId?: string;
+  displayName: string;
+  gradeBand: string;
+  school?: string;
+  schoolClass?: string;
+  classNames: string[];
+  classType: ClassType;
+  acceptedLocationIds: string[];
+  existingCourses: StudentOriginalCourse[];
+  weeklySessionNeed?: number;
+  lessonMinutes?: number;
+}
+
+export interface StudentLoginResult {
+  session: {
+    token: string;
+    expiresAt: string;
+  };
+  profile: StudentScheduleProfile;
+  locations: Location[];
+  travelTimes: TravelTime[];
+}
+
 export interface OptimizerSettings {
   weights: Record<string, number>;
   rules: Record<string, unknown>;
@@ -168,6 +194,7 @@ export interface AppState {
 }
 
 export interface StudentSubmissionPayload {
+  chemStudentId?: string;
   name: string;
   grade: string;
   contact?: string;

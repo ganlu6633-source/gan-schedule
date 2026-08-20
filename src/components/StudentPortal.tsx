@@ -1,505 +1,404 @@
 import React from 'react';
-import { AppState, AvailabilityStatus, ClassType, StudentOriginalCourse, StudentSubmissionPayload, WeekDay } from '../types';
-import { TimeGridEditor } from './TimeGridEditor';
-import { FormatWeek } from './format';
+import {
+  AppState,
+  AvailabilityStatus,
+  StudentLoginResult,
+  StudentOriginalCourse,
+  StudentSubmissionPayload,
+  TravelTime,
+  WeekDay,
+} from '../types';
+import { createUuid } from '../utils/id';
 import { slotStarts, toSlotKey } from '../utils/time';
 
-const DEFAULT_CLASS_TYPES: ClassType[] = ['一对一', '一对二', '一对三', '小班', '已有固定班课', '两者均可', '尚未确定'];
-const DRAFT_KEY = 'ganschedule_student_draft_v2';
+const SESSION_KEY = 'ganschedule_student_session_v3';
+const WEEKEND_DAYS: WeekDay[] = [6, 7];
 
-const makeDefaultAvailability = (): Record<string, AvailabilityStatus> => {
-  const map: Record<string, AvailabilityStatus> = {};
-  for (let day = 1; day <= 7; day++) {
-    slotStarts.forEach((start) => {
-      map[toSlotKey(day as WeekDay, start)] = 'free';
-    });
-  }
-  return map;
+type CourseDraft = {
+  id: string;
+  day: WeekDay;
+  start: string;
+  end: string;
+  title: string;
+  locationId: string;
+};
+
+type CommuteCheck = {
+  id: string;
+  severity: 'ok' | 'warning' | 'error';
+  text: string;
 };
 
 const toMinute = (value: string) => {
-  const [h, m] = value.split(':').map((item) => Number(item));
-  if (Number.isNaN(h) || Number.isNaN(m)) return 0;
-  return h * 60 + m;
+  const [hour, minute] = value.split(':').map(Number);
+  return Number.isFinite(hour) && Number.isFinite(minute) ? hour * 60 + minute : 0;
 };
 
-const newCourse = (state: AppState) => ({
-  day: 1 as WeekDay,
-  start: '13:00',
-  end: '14:00',
-  title: '',
-  locationId: state.locations[0]?.id || '',
-  isFixed: false,
-  adjustDifficulty: 3 as 1 | 2 | 3 | 4 | 5,
-  notes: '',
+const toClock = (minute: number) =>
+  `${String(Math.floor(minute / 60)).padStart(2, '0')}:${String(minute % 60).padStart(2, '0')}`;
+
+const makeDefaultAvailability = (): Record<string, AvailabilityStatus> => {
+  const result: Record<string, AvailabilityStatus> = {};
+  for (let day = 1; day <= 7; day++) {
+    slotStarts.forEach((start) => {
+      result[toSlotKey(day as WeekDay, start)] = 'free';
+    });
+  }
+  return result;
+};
+
+const courseToDraft = (course: StudentOriginalCourse): CourseDraft => ({
+  id: course.id || createUuid(),
+  day: WEEKEND_DAYS.includes(course.day) ? course.day : 6,
+  start: toClock(course.startMinute),
+  end: toClock(course.endMinute),
+  title: course.title === '已有安排' || course.title === '原有课程' ? '' : course.title,
+  locationId: course.locationId,
 });
 
-interface FormDraft {
-  step: number;
-  name: string;
-  grade: string;
-  contact: string;
-  teacherClassNote: string;
-  school: string;
-  classType: ClassType;
-  availability: Record<string, AvailabilityStatus>;
-  courses: Array<{
-    day: WeekDay;
-    start: string;
-    end: string;
-    title: string;
-    locationId: string;
-    isFixed: boolean;
-    adjustDifficulty: 1 | 2 | 3 | 4 | 5;
-    notes: string;
-  }>;
-  acceptedLocationIds: string[];
-  targetStudentCount: string;
-  notes: string;
-  weeklySessionNeed: string;
-  lessonMinutes: string;
-}
-
-const createEmptyDraft = (state: AppState): FormDraft => ({
-  step: 0,
-  name: '',
-  grade: '',
-  contact: '',
-  teacherClassNote: '',
-  school: '',
-  classType: '一对一',
-  availability: makeDefaultAvailability(),
-  courses: [newCourse(state)],
-  acceptedLocationIds: [],
-  targetStudentCount: '',
-  notes: '',
-  weeklySessionNeed: '',
-  lessonMinutes: '',
-});
-
-const mapCourseForPayload = (course: FormDraft['courses'][number]): StudentOriginalCourse => ({
-  id: `stu-course-${Date.now()}-${course.day}-${course.start}-${course.end}-${course.title}`,
-  title: course.title || '原有课程',
+const draftToCourse = (course: CourseDraft): StudentOriginalCourse => ({
+  id: course.id,
   day: course.day,
   startMinute: toMinute(course.start),
   endMinute: toMinute(course.end),
+  title: course.title.trim() || '已有课程',
   locationId: course.locationId,
-  isFixed: course.isFixed,
-  adjustDifficulty: course.adjustDifficulty,
-  notes: course.notes,
+  isFixed: true,
+  adjustDifficulty: 1,
 });
+
+const travelFor = (travelTimes: TravelTime[], from: string, to: string) =>
+  travelTimes.find((item) => item.fromLocationId === from && item.toLocationId === to);
 
 export function StudentPortal({
   state,
+  onAuthenticate,
   onSubmit,
-  classTypeOptions,
 }: {
   state: AppState;
-  onSubmit: (payload: StudentSubmissionPayload) => Promise<{ id: string }>;
-  classTypeOptions?: ClassType[];
+  onAuthenticate: (name: string, code: string) => Promise<StudentLoginResult>;
+  onSubmit: (payload: StudentSubmissionPayload, sessionToken: string) => Promise<{ id: string }>;
 }) {
-  const [draft, setDraft] = React.useState<FormDraft>(createEmptyDraft(state));
-  const [submitting, setSubmitting] = React.useState(false);
+  const [name, setName] = React.useState('');
+  const [code, setCode] = React.useState('');
+  const [identity, setIdentity] = React.useState<StudentLoginResult | null>(null);
+  const [courses, setCourses] = React.useState<CourseDraft[]>([]);
+  const [notes, setNotes] = React.useState('');
+  const [loading, setLoading] = React.useState(false);
   const [message, setMessage] = React.useState('');
   const [messageType, setMessageType] = React.useState<'success' | 'error' | ''>('');
 
   React.useEffect(() => {
     try {
-      const raw = window.localStorage.getItem(DRAFT_KEY);
+      const raw = window.sessionStorage.getItem(SESSION_KEY);
       if (!raw) return;
-      const parsed = JSON.parse(raw) as Partial<FormDraft>;
-      const availability = parsed.availability || draft.availability;
-      setDraft((prev) => ({ ...prev, ...parsed, step: parsed.step ?? 0, availability }));
+      const saved = JSON.parse(raw) as StudentLoginResult;
+      if (!saved.session?.token || new Date(saved.session.expiresAt).getTime() <= Date.now()) {
+        window.sessionStorage.removeItem(SESSION_KEY);
+        return;
+      }
+      setIdentity(saved);
+      setCourses(saved.profile.existingCourses.filter((course) => WEEKEND_DAYS.includes(course.day)).map(courseToDraft));
     } catch {
-      // ignore local draft parse error
+      window.sessionStorage.removeItem(SESSION_KEY);
     }
   }, []);
 
-  React.useEffect(() => {
-    const resolvedCourses = draft.courses.map((course) => ({
-      ...course,
-      locationId: course.locationId || state.locations[0]?.id || '',
-    }));
-    const normalizedAccepted = draft.acceptedLocationIds.filter((id) => state.locations.some((loc) => loc.id === id));
-    setDraft((prev) => ({ ...prev, courses: resolvedCourses, acceptedLocationIds: normalizedAccepted }));
-  }, [state.locations.length]);
+  const locations = identity?.locations.length ? identity.locations : state.locations;
+  const travelTimes = identity?.travelTimes || [];
 
-  React.useEffect(() => {
-    if (typeof window === 'undefined') return;
-    window.localStorage.setItem(DRAFT_KEY, JSON.stringify(draft));
-  }, [draft]);
-
-  const progress = ((draft.step + 1) / 6) * 100;
-  const classTypes = classTypeOptions && classTypeOptions.length > 0 ? classTypeOptions : DEFAULT_CLASS_TYPES;
-
-  const reset = (clearMessage = true) => {
-    setDraft(createEmptyDraft(state));
-    if (clearMessage) {
-      setMessage('');
-      setMessageType('');
-    }
-    window.localStorage.removeItem(DRAFT_KEY);
-  };
-
-  const addCourse = () => setDraft((prev) => ({ ...prev, courses: [...prev.courses, newCourse(state)] }));
-  const removeCourse = (index: number) => setDraft((prev) => ({ ...prev, courses: prev.courses.filter((_, i) => i !== index) }));
-
-  const updateCourse = (
-    index: number,
-    patch: Partial<{
-      day: WeekDay;
-      start: string;
-      end: string;
-      title: string;
-      locationId: string;
-      isFixed: boolean;
-      adjustDifficulty: 1 | 2 | 3 | 4 | 5;
-      notes: string;
-    }>
-  ) => {
-    setDraft((prev) => ({
-      ...prev,
-      courses: prev.courses.map((course, idx) => (idx === index ? { ...course, ...patch } : course)),
-    }));
-  };
-
-  const toPayload = (): StudentSubmissionPayload => {
-    const originalCourses = draft.courses
-      .filter((course) => course.title.trim().length > 0 && course.start !== course.end)
-      .map((course) => mapCourseForPayload(course));
-
-    return {
-      name: draft.name.trim(),
-      grade: draft.grade.trim(),
-      contact: draft.contact.trim() || undefined,
-      teacherClassNote: draft.teacherClassNote.trim() || undefined,
-      courseNeed: draft.teacherClassNote.trim() || undefined,
-      school: draft.school.trim() || undefined,
-      classType: draft.classType,
-      availability: draft.availability,
-      originalCourses,
-      acceptedLocationIds: draft.acceptedLocationIds,
-      targetStudentCount: Number(draft.targetStudentCount) || undefined,
-      notes: draft.notes.trim() || undefined,
-      weeklySessionNeed: Number(draft.weeklySessionNeed) || undefined,
-      lessonMinutes: Number(draft.lessonMinutes) || undefined,
-    };
-  };
-
-  const submit = async () => {
-    if (!draft.name.trim() || !draft.grade.trim()) {
+  const authenticate = async () => {
+    if (!name.trim() || !/^\d{6,12}$/.test(code)) {
       setMessageType('error');
-      setMessage('请先填写姓名和年级。');
+      setMessage('请输入学生姓名和复习系统的 6 至 12 位数字登录码。');
       return;
     }
-    if (draft.courses.some((course) => toMinute(course.end) <= toMinute(course.start))) {
-      setMessageType('error');
-      setMessage('已有安排的结束时间必须晚于开始时间。');
-      return;
-    }
-    setSubmitting(true);
-    setMessageType('');
+    setLoading(true);
+    setMessage('');
     try {
-      const payload = toPayload();
-      const result = await onSubmit(payload);
+      const result = await onAuthenticate(name, code);
+      setIdentity(result);
+      setCourses(result.profile.existingCourses.filter((course) => WEEKEND_DAYS.includes(course.day)).map(courseToDraft));
+      setCode('');
+      window.sessionStorage.setItem(SESSION_KEY, JSON.stringify(result));
       setMessageType('success');
-      setMessage(`提交成功，编号：${result.id}`);
-      reset(false);
+      setMessage('身份匹配成功，年级、学校、班级和上课地点已自动读取。');
     } catch (error: any) {
       setMessageType('error');
-      setMessage(error?.message || '提交失败，请重试。');
+      setMessage(error?.message || '姓名或登录码不正确。');
     } finally {
-      setSubmitting(false);
+      setLoading(false);
+    }
+  };
+
+  const switchStudent = () => {
+    window.sessionStorage.removeItem(SESSION_KEY);
+    setIdentity(null);
+    setCourses([]);
+    setNotes('');
+    setMessage('');
+    setMessageType('');
+    setName('');
+    setCode('');
+  };
+
+  const addCourse = () => {
+    setCourses((current) => [
+      ...current,
+      {
+        id: createUuid(),
+        day: 6,
+        start: '09:00',
+        end: '10:00',
+        title: '',
+        locationId: locations[0]?.id || '',
+      },
+    ]);
+  };
+
+  const updateCourse = (id: string, next: Partial<CourseDraft>) => {
+    setCourses((current) => current.map((course) => (course.id === id ? { ...course, ...next } : course)));
+  };
+
+  const validCourses = courses
+    .filter((course) => course.locationId && toMinute(course.end) > toMinute(course.start))
+    .map(draftToCourse)
+    .sort((a, b) => a.day - b.day || a.startMinute - b.startMinute);
+
+  const commuteChecks = React.useMemo<CommuteCheck[]>(() => {
+    const checks: CommuteCheck[] = [];
+    for (const day of WEEKEND_DAYS) {
+      const daily = validCourses.filter((course) => course.day === day);
+      for (let index = 1; index < daily.length; index++) {
+        const previous = daily[index - 1];
+        const next = daily[index];
+        const previousLocation = locations.find((item) => item.id === previous.locationId)?.name || '上一地点';
+        const nextLocation = locations.find((item) => item.id === next.locationId)?.name || '下一地点';
+        const gap = next.startMinute - previous.endMinute;
+        if (gap < 0) {
+          checks.push({
+            id: `${day}-${previous.id}-${next.id}`,
+            severity: 'error',
+            text: `${day === 6 ? '周六' : '周日'} ${previous.title} 与 ${next.title} 重叠 ${Math.abs(gap)} 分钟。`,
+          });
+          continue;
+        }
+        if (previous.locationId === next.locationId) {
+          checks.push({
+            id: `${day}-${previous.id}-${next.id}`,
+            severity: 'ok',
+            text: `${previousLocation}连续上课，间隔 ${gap} 分钟，不需要通勤。`,
+          });
+          continue;
+        }
+        const travel = travelFor(travelTimes, previous.locationId, next.locationId);
+        if (!travel) {
+          checks.push({
+            id: `${day}-${previous.id}-${next.id}`,
+            severity: 'warning',
+            text: `${previousLocation} → ${nextLocation} 尚未配置通勤时间，教师端会收到补充提醒。`,
+          });
+          continue;
+        }
+        const required = travel.minutes + (travel.bufferMinutes || 0);
+        const bufferText = travel.bufferMinutes ? ' + ' + travel.bufferMinutes + ' 分钟缓冲' : '';
+        checks.push({
+          id: `${day}-${previous.id}-${next.id}`,
+          severity: gap < required ? 'error' : 'ok',
+          text:
+            `${previousLocation} → ${nextLocation} 需要 ${travel.minutes} 分钟${bufferText}；实际间隔 ${gap} 分钟，` +
+            (gap < required ? `不足 ${required - gap} 分钟。` : `富余 ${gap - required} 分钟。`),
+        });
+      }
+    }
+    return checks;
+  }, [validCourses, locations, travelTimes]);
+
+  const submit = async () => {
+    if (!identity) return;
+    if (courses.some((course) => !course.locationId || toMinute(course.end) <= toMinute(course.start))) {
+      setMessageType('error');
+      setMessage('请为每条已有课程选择地点，并确保结束时间晚于开始时间。');
+      return;
+    }
+    const availability = makeDefaultAvailability();
+    validCourses.forEach((course) => {
+      slotStarts.forEach((start) => {
+        if (start < course.endMinute && start + 30 > course.startMinute) {
+          availability[toSlotKey(course.day, start)] = 'blocked';
+        }
+      });
+    });
+    const generatedWarnings = commuteChecks
+      .filter((item) => item.severity !== 'ok')
+      .map((item) => item.text)
+      .join('；');
+    const payload: StudentSubmissionPayload = {
+      chemStudentId: identity.profile.chemStudentId,
+      name: identity.profile.displayName,
+      grade: identity.profile.gradeBand,
+      school: identity.profile.school || identity.profile.schoolClass,
+      classType: identity.profile.classType,
+      availability,
+      originalCourses: validCourses,
+      acceptedLocationIds: identity.profile.acceptedLocationIds.length
+        ? identity.profile.acceptedLocationIds
+        : locations.map((location) => location.id),
+      weeklySessionNeed: identity.profile.weeklySessionNeed,
+      lessonMinutes: identity.profile.lessonMinutes,
+      notes: [notes.trim(), generatedWarnings].filter(Boolean).join('；') || undefined,
+    };
+    setLoading(true);
+    setMessage('');
+    try {
+      const result = await onSubmit(payload, identity.session.token);
+      setMessageType('success');
+      setMessage(`周末安排已提交，编号：${result.id}。甘老师会在教师端直接看到更新。`);
+    } catch (error: any) {
+      setMessageType('error');
+      setMessage(error?.message || '提交失败，请稍后重试。');
+      if (/登录已失效/.test(error?.message || '')) switchStudent();
+    } finally {
+      setLoading(false);
     }
   };
 
   return (
-    <main className="app-shell">
-      <header className="hero">
-        <p>学生端 · 填写链接</p>
-        <h1>甘老师智能排课 · 学生信息提交</h1>
+    <main className="app-shell student-access-shell">
+      <header className="hero student-hero">
+        <div>
+          <p>统一学生账号 · 周末排课</p>
+          <h1>确认周六、周日已有课程</h1>
+          <span>年级、学校、班级和甘老师上课地点由系统自动匹配，学生不需要重复填写。</span>
+        </div>
+        <div className="weekend-mark" aria-hidden="true"><strong>六</strong><strong>日</strong></div>
       </header>
 
-      <div className="progress">
-        <div className="bar" style={{ width: `${progress}%` }} />
-      </div>
+      {message && <p className={`form-message ${messageType}`}>{message}</p>}
 
-      {message && (
-        <p className="tiny" style={{ color: messageType === 'error' ? '#d12f2f' : '#2ca46f' }}>
-          {message}
-        </p>
-      )}
-
-      {draft.step === 0 && (
-        <section className="card">
-          <h2>1. 基本信息</h2>
+      {!identity ? (
+        <section className="card student-login-card">
+          <div className="section-kicker">和复习系统使用同一个登录码</div>
+          <h2>学生登录</h2>
+          <p className="tiny">这里只验证身份，不需要重新填写年级、学校或班级。</p>
           <label>
-            学生姓名 *
-            <input value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} placeholder="例如：张同学" />
+            学生姓名
+            <input value={name} onChange={(event) => setName(event.target.value)} placeholder="请输入复习系统中的姓名" autoComplete="name" />
           </label>
           <label>
-            年级 *
-            <input value={draft.grade} onChange={(e) => setDraft({ ...draft, grade: e.target.value })} placeholder="例如：高三" />
-          </label>
-          <label>
-            联系方式（选填）
+            复习系统登录码
             <input
-              value={draft.contact}
-              onChange={(e) => setDraft({ ...draft, contact: e.target.value })}
-              placeholder="微信 / 电话"
-            />
-          </label>
-          <label>
-            学校（选填）
-            <input value={draft.school} onChange={(e) => setDraft({ ...draft, school: e.target.value })} placeholder="例如：北京第一中学" />
-          </label>
-          <label>
-            课程需求（选填）
-            <input
-              value={draft.teacherClassNote}
-              onChange={(e) => setDraft({ ...draft, teacherClassNote: e.target.value })}
-              placeholder="例如：已在 X 班学习英语"
-            />
-          </label>
-          <div className="actions">
-            <button
-              disabled={!draft.name.trim() || !draft.grade.trim() || submitting}
-              onClick={() => setDraft({ ...draft, step: 1 })}
-            >
-              下一步
-            </button>
-          </div>
-        </section>
-      )}
-
-      {draft.step === 1 && (
-        <section className="card">
-          <h2>2. 上课类型</h2>
-          <label>
-            课程类型
-            <select value={draft.classType} onChange={(e) => setDraft({ ...draft, classType: e.target.value as ClassType })}>
-              {classTypes.map((type) => (
-                <option key={type}>{type}</option>
-              ))}
-            </select>
-          </label>
-          <label>
-            目标班级人数（选填）
-            <input
-              value={draft.targetStudentCount}
+              type="password"
               inputMode="numeric"
-              onChange={(e) => setDraft({ ...draft, targetStudentCount: e.target.value.replace(/[^0-9]/g, '') })}
-              placeholder="如：2"
+              value={code}
+              maxLength={12}
+              onChange={(event) => setCode(event.target.value.replace(/\D/g, '').slice(0, 12))}
+              placeholder="6 至 12 位数字"
+              autoComplete="one-time-code"
             />
           </label>
-          <div className="actions">
-            <button onClick={() => setDraft({ ...draft, step: 0 })}>上一步</button>
-            <button onClick={() => setDraft({ ...draft, step: 2 })}>下一步</button>
-          </div>
-        </section>
-      )}
-
-      {draft.step === 2 && (
-        <section className="card">
-          <h2>3. 每周可上课情况</h2>
-          <TimeGridEditor
-            title="点击设置每周时间状态（每30分钟）"
-            value={draft.availability}
-            palette={[
-              { value: 'free', text: '可上课', color: 'status-free' },
-              { value: 'adjust', text: '可调整', color: 'status-adjust' },
-              { value: 'hardAdjust', text: '不太方便调整', color: 'status-hard' },
-              { value: 'blocked', text: '不能上课', color: 'status-blocked' },
-            ]}
-            onChange={(next) => setDraft({ ...draft, availability: next })}
-          />
-          <div className="actions">
-            <button onClick={() => setDraft({ ...draft, step: 1 })}>上一步</button>
-            <button onClick={() => setDraft({ ...draft, step: 3 })}>下一步</button>
-          </div>
-        </section>
-      )}
-
-      {draft.step === 3 && (
-        <section className="card">
-          <h2>4. 原有课程（可添加多条）</h2>
-          {draft.courses.map((course, index) => (
-            <div key={`${index}-${course.title}`} className="course-card">
-              <label>
-                课程名称
-                <input
-                  value={course.title}
-                  onChange={(e) => updateCourse(index, { title: e.target.value })}
-                  placeholder="课程名"
-                />
-              </label>
-              <div className="row">
-                <label>
-                  星期
-                  <select value={course.day} onChange={(e) => updateCourse(index, { day: Number(e.target.value) as WeekDay })}>
-                    {[1, 2, 3, 4, 5, 6, 7].map((day) => (
-                      <option key={day} value={day}>
-                        <FormatWeek day={day as WeekDay} />
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label>
-                  开始
-                  <input type="time" value={course.start} onChange={(e) => updateCourse(index, { start: e.target.value })} />
-                </label>
-                <label>
-                  结束
-                  <input type="time" value={course.end} onChange={(e) => updateCourse(index, { end: e.target.value })} />
-                </label>
-              </div>
-              <div className="row">
-                <label>
-                  地点
-                  <select value={course.locationId} onChange={(e) => updateCourse(index, { locationId: e.target.value })}>
-                    {state.locations.map((loc) => (
-                      <option key={loc.id} value={loc.id}>
-                        {loc.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label>
-                  是否固定
-                  <select value={course.isFixed ? '1' : '0'} onChange={(e) => updateCourse(index, { isFixed: e.target.value === '1' })}>
-                    <option value="1">是</option>
-                    <option value="0">否</option>
-                  </select>
-                </label>
-                <label>
-                  调整难度
-                  <select
-                    value={course.adjustDifficulty}
-                    onChange={(e) => updateCourse(index, { adjustDifficulty: Number(e.target.value) as 1 | 2 | 3 | 4 | 5 })}
-                  >
-                    {[1, 2, 3, 4, 5].map((value) => (
-                      <option key={value} value={value}>
-                        {value}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              </div>
-              <label>
-                备注
-                <input value={course.notes} onChange={(e) => updateCourse(index, { notes: e.target.value })} />
-              </label>
-              {draft.courses.length > 1 && (
-                <button type="button" className="danger" onClick={() => removeCourse(index)}>
-                  删除课程
-                </button>
-              )}
-            </div>
-          ))}
-          <button type="button" onClick={addCourse}>
-            + 添加课程
+          <button disabled={loading || !name.trim() || code.length < 6} onClick={authenticate}>
+            {loading ? '正在匹配学生资料...' : '登录并读取我的资料'}
           </button>
-          <div className="actions">
-            <button onClick={() => setDraft({ ...draft, step: 2 })}>上一步</button>
-            <button onClick={() => setDraft({ ...draft, step: 4 })}>下一步</button>
-          </div>
+          <p className="privacy-note">登录码只发送给统一身份服务验证，不会写入排课表或保存在浏览器草稿中。</p>
         </section>
-      )}
+      ) : (
+        <>
+          <section className="card matched-profile">
+            <div><div className="section-kicker">已匹配复习系统学生</div><h2>{identity.profile.displayName}</h2></div>
+            <button className="secondary-button" onClick={switchStudent}>切换学生</button>
+            <div className="profile-facts">
+              <div><span>年级</span><strong>{identity.profile.gradeBand || '资料库暂未登记'}</strong></div>
+              <div><span>学校 / 班级</span><strong>{identity.profile.schoolClass || identity.profile.school || '资料库暂未登记'}</strong></div>
+              <div><span>当前班级</span><strong>{identity.profile.classNames.length ? identity.profile.classNames.join('、') : '尚未正式组班'}</strong></div>
+              <div>
+                <span>甘老师上课地点</span>
+                <strong>
+                  {identity.profile.acceptedLocationIds.length
+                    ? identity.profile.acceptedLocationIds.map((id) => locations.find((item) => item.id === id)?.name).filter(Boolean).join('、')
+                    : locations.map((item) => item.name).join('、')}
+                </strong>
+              </div>
+            </div>
+          </section>
 
-      {draft.step === 4 && (
-        <section className="card">
-          <h2>5. 可接受上课地点</h2>
-          <div className="location-list">
-            {state.locations.map((location) => (
-              <label key={location.id} className="check-item">
-                <input
-                  type="checkbox"
-                  checked={draft.acceptedLocationIds.includes(location.id)}
-                  onChange={(e) => {
-                    if (e.target.checked) {
-                      setDraft((prev) => ({ ...prev, acceptedLocationIds: [...prev.acceptedLocationIds, location.id] }));
-                    } else {
-                      setDraft((prev) => ({
-                        ...prev,
-                        acceptedLocationIds: prev.acceptedLocationIds.filter((id) => id !== location.id),
-                      }));
-                    }
-                  }}
-                />
-                {location.name}
-              </label>
+          <section className="card">
+            <div className="section-heading">
+              <div><div className="section-kicker">只填已经被占用的时间</div><h2>周六、周日已有课程</h2></div>
+              <button className="compact-button" onClick={addCourse}>+ 添加一段已有课程</button>
+            </div>
+            {!courses.length && (
+              <div className="empty-weekend">
+                <strong>目前没有登记其他课程</strong>
+                <p>如果周末完全没有其他课，可以直接提交；有课时再点击上方按钮添加。</p>
+              </div>
+            )}
+            {courses.map((course, index) => (
+              <article className="weekend-course-card" key={course.id}>
+                <div className="course-number">{index + 1}</div>
+                <div className="row">
+                  <label>
+                    星期
+                    <select value={course.day} onChange={(event) => updateCourse(course.id, { day: Number(event.target.value) as WeekDay })}>
+                      <option value={6}>周六</option>
+                      <option value={7}>周日</option>
+                    </select>
+                  </label>
+                  <label>开始时间<input type="time" value={course.start} onChange={(event) => updateCourse(course.id, { start: event.target.value })} /></label>
+                  <label>结束时间<input type="time" value={course.end} onChange={(event) => updateCourse(course.id, { end: event.target.value })} /></label>
+                </div>
+                <div className="row">
+                  <label>课程 / 安排名称（选填）<input value={course.title} onChange={(event) => updateCourse(course.id, { title: event.target.value })} placeholder="例如：数学课" /></label>
+                  <label>
+                    上课地点
+                    <select value={course.locationId} onChange={(event) => updateCourse(course.id, { locationId: event.target.value })}>
+                      <option value="">请选择地点</option>
+                      {locations.map((location) => <option key={location.id} value={location.id}>{location.name}</option>)}
+                    </select>
+                  </label>
+                </div>
+                <button className="text-danger" onClick={() => setCourses((current) => current.filter((item) => item.id !== course.id))}>删除这段课程</button>
+              </article>
             ))}
-          </div>
-          <label>
-            每周希望节数
-            <input
-              value={draft.weeklySessionNeed}
-              onChange={(e) => setDraft((prev) => ({ ...prev, weeklySessionNeed: e.target.value }))}
-              placeholder="如：2"
-            />
-          </label>
-          <label>
-            单节时长（分钟）
-            <select
-              value={draft.lessonMinutes}
-              onChange={(e) => setDraft((prev) => ({ ...prev, lessonMinutes: e.target.value }))}
-            >
-              <option value="">请选择</option>
-              <option value="60">60</option>
-              <option value="90">90</option>
-              <option value="120">120</option>
-            </select>
-          </label>
-          <label>
-            备注
-            <textarea value={draft.notes} rows={3} onChange={(e) => setDraft((prev) => ({ ...prev, notes: e.target.value }))} />
-          </label>
-          <div className="actions">
-            <button onClick={() => setDraft({ ...draft, step: 3 })}>上一步</button>
-            <button onClick={() => setDraft({ ...draft, step: 5 })}>下一步</button>
-          </div>
-        </section>
-      )}
+          </section>
 
-      {draft.step === 5 && (
-        <section className="card">
-          <h2>6. 提交确认</h2>
-          <p>请确认后提交审核。</p>
-          <div className="summary">
-            <p>
-              <strong>姓名：</strong>
-              {draft.name || '未填写'}
-            </p>
-            <p>
-              <strong>年级：</strong>
-              {draft.grade || '未填写'}
-            </p>
-            <p>
-              <strong>上课类型：</strong>
-              {draft.classType}
-            </p>
-            <p>
-              <strong>已设置课程：</strong>
-              {draft.courses.filter((course) => course.title.trim().length > 0 && course.start !== course.end).length} 条
-            </p>
-            <p>
-              <strong>目标班级人数：</strong>
-              {draft.targetStudentCount || '未填写'}
-            </p>
-            <p>
-              <strong>可接受地点：</strong>
-              {draft.acceptedLocationIds.length
-                ? draft.acceptedLocationIds.map((id) => state.locations.find((loc) => loc.id === id)?.name || id).join('、')
-                : '不限'}
-            </p>
-          </div>
-          <div className="actions">
-            <button onClick={() => setDraft({ ...draft, step: 4 })}>上一步</button>
-            <button disabled={submitting} onClick={submit}>
-              {submitting ? '提交中...' : '提交并进入审核'}
-            </button>
-          </div>
-        </section>
+          <section className="card commute-card">
+            <div className="section-kicker">系统自动核算</div>
+            <h2>课程冲突与通勤检查</h2>
+            {!commuteChecks.length ? (
+              <p className="tiny">添加两段或以上课程后，系统会按时间顺序自动检查重叠和地点通勤。</p>
+            ) : (
+              <div className="commute-checks">
+                {commuteChecks.map((check) => <div key={check.id} className={`commute-result ${check.severity}`}>{check.text}</div>)}
+              </div>
+            )}
+            <details>
+              <summary>查看全部地点通勤时间</summary>
+              <div className="travel-list">
+                {travelTimes.map((travel) => {
+                  const from = locations.find((item) => item.id === travel.fromLocationId)?.name;
+                  const to = locations.find((item) => item.id === travel.toLocationId)?.name;
+                  if (!from || !to) return null;
+                  return (
+                    <div key={`${travel.fromLocationId}-${travel.toLocationId}`}>
+                      <strong>{from} → {to}</strong>
+                      <span>{travel.minutes} 分钟{travel.bufferMinutes ? ' + ' + travel.bufferMinutes + ' 分钟缓冲' : ''}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </details>
+          </section>
+
+          <section className="card submit-weekend-card">
+            <label>
+              给甘老师的补充说明（选填）
+              <textarea rows={3} value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="只写时间或地点需要特别说明的内容" />
+            </label>
+            <button disabled={loading} onClick={submit}>{loading ? '正在提交...' : '确认并提交周末安排'}</button>
+            <p className="privacy-note">提交后会自动匹配到你在复习系统中的学生档案，不会创建同名重复学生。</p>
+          </section>
+        </>
       )}
     </main>
   );
