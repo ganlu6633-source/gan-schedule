@@ -27,7 +27,7 @@ const newCourse = (state: AppState) => ({
   day: 1 as WeekDay,
   start: '13:00',
   end: '14:00',
-  title: '原有课程',
+  title: '',
   locationId: state.locations[0]?.id || '',
   isFixed: false,
   adjustDifficulty: 3 as 1 | 2 | 3 | 4 | 5,
