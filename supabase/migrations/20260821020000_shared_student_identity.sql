@@ -54,3 +54,14 @@ do update set
   minutes = excluded.minutes,
   buffer_minutes = excluded.buffer_minutes,
   updated_at = now();
+
+-- Anonymous clients must not bypass the shared chemistry identity check.
+-- Student writes now go through chemistry-schedule-access using a validated,
+-- short-lived app session; the service-role client performs the actual insert.
+drop policy if exists sched_intake_anon_insert
+  on public.sched_intake_submissions;
+
+revoke insert on table public.sched_intake_submissions from anon;
+
+comment on table public.sched_intake_submissions is
+  'Student intake is written only by the authenticated shared-identity Edge Function or an allowlisted teacher.';
