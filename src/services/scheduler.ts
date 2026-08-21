@@ -3,6 +3,7 @@ import {
   AppState,
   CommonFreeWindow,
   ConflictItem,
+  GroupSuggestion,
   ScheduleProposal,
   Student,
   TeacherTimeStatus,
@@ -16,7 +17,21 @@ type TravelRequirement = {
   bufferMinutes: number;
 };
 
-const STRATEGIES: ScheduleProposal['strategy'][] = ['最少调学生', '教师最少通勤', '课程更集中'];
+type TravelFit = {
+  blocked: boolean;
+  minutes: number;
+  warnings: string[];
+  reason?: string;
+};
+
+type TimelineEvent = {
+  startMinute: number;
+  endMinute: number;
+  locationId: string;
+  title: string;
+};
+
+const STRATEGIES: ScheduleProposal['strategy'][] = ['冲突最少', '学生通勤最少', '教师最少通勤', '课程更集中'];
 
 const getDuration = (students: Student[], requested?: number) => {
   if (requested && requested > 0) return requested;
@@ -60,6 +75,85 @@ const travelBetween = (state: AppState, fromLocationId: string, toLocationId: st
   };
 };
 
+const studentEventsForDay = (state: AppState, student: Student, day: WeekDay): TimelineEvent[] => [
+  ...student.originalCourses
+    .filter((course) => course.day === day)
+    .map((course) => ({
+      startMinute: course.startMinute,
+      endMinute: course.endMinute,
+      locationId: course.locationId,
+      title: course.title,
+    })),
+  ...state.teacherCourses
+    .filter((course) => course.status !== 'cancelled' && course.day === day && course.studentIds.includes(student.id))
+    .map((course) => ({
+      startMinute: course.startMinute,
+      endMinute: course.endMinute,
+      locationId: course.locationId,
+      title: course.title,
+    })),
+].sort((left, right) => left.startMinute - right.startMinute || left.endMinute - right.endMinute);
+
+const studentTravelFit = (
+  state: AppState,
+  student: Student,
+  day: WeekDay,
+  start: number,
+  end: number,
+  locationId: string
+): TravelFit => {
+  const events = studentEventsForDay(state, student, day);
+  const before = events.filter((event) => event.endMinute <= start).slice(-1)[0];
+  const after = events.find((event) => event.startMinute >= end);
+  let minutes = 0;
+  const warnings: string[] = [];
+
+  for (const edge of [
+    before ? { event: before, from: before.locationId, to: locationId, available: start - before.endMinute } : null,
+    after ? { event: after, from: locationId, to: after.locationId, available: after.startMinute - end } : null,
+  ]) {
+    if (!edge || edge.from === edge.to) continue;
+    if (!edge.from || !edge.to) {
+      return {
+        blocked: true,
+        minutes,
+        warnings,
+        reason: student.name + ' 的“' + edge.event.title + '”未设置地点，无法验证前后通勤。',
+      };
+    }
+    const requirement = travelBetween(state, edge.from, edge.to);
+    if (!requirement) {
+      return {
+        blocked: true,
+        minutes,
+        warnings,
+        reason: student.name + ' 的相邻地点缺少方向性通勤记录。',
+      };
+    }
+    const required = requirement.minutes + requirement.bufferMinutes;
+    if (edge.available < required) {
+      return {
+        blocked: true,
+        minutes,
+        warnings,
+        reason:
+          student.name +
+          ' 在“' +
+          edge.event.title +
+          '”前后只有 ' +
+          edge.available +
+          ' 分钟，通勤与缓冲需要 ' +
+          required +
+          ' 分钟。',
+      };
+    }
+    minutes += required;
+    if (edge.available - required < SLOT_MINUTES) warnings.push(student.name + ' 的通勤余量不足 30 分钟。');
+  }
+
+  return { blocked: false, minutes, warnings };
+};
+
 const locationAllowed = (student: Student, locationId: string) =>
   student.acceptedLocationIds.length === 0 || student.acceptedLocationIds.includes(locationId);
 
@@ -99,6 +193,7 @@ const movePenalty = (state: AppState, day: WeekDay, start: number, end: number, 
   const after = sameDay.find((course) => course.startMinute >= end);
   let penalty = 0;
   let warnings = 0;
+  let travelMinutes = 0;
 
   for (const item of [
     before ? { from: before.locationId, to: locationId, available: start - before.endMinute } : null,
@@ -113,10 +208,11 @@ const movePenalty = (state: AppState, day: WeekDay, start: number, end: number, 
       penalty += 60;
       warnings += 1;
     } else {
+      travelMinutes += requirement.minutes + requirement.bufferMinutes;
       penalty += Math.min(20, requirement.minutes / 4);
     }
   }
-  return { penalty, warnings };
+  return { penalty, warnings, travelMinutes };
 };
 
 const weightsFor = (state: AppState) => ({
@@ -142,15 +238,28 @@ export function detectConflicts(state: AppState): ConflictItem[] {
     for (let index = 0; index < sorted.length; index += 1) {
       const current = sorted[index];
       const next = sorted[index + 1];
-      if (next && overlap(current.startMinute, current.endMinute, next.startMinute, next.endMinute)) {
+      for (let compareIndex = index + 1; compareIndex < sorted.length; compareIndex += 1) {
+        const compared = sorted[compareIndex];
+        if (compared.startMinute >= current.endMinute) break;
+        if (!overlap(current.startMinute, current.endMinute, compared.startMinute, compared.endMinute)) continue;
         output.push({
           id: createUuid(),
           kind: 'teacher',
           severity: 'error',
           day,
           title: '教师时间冲突',
-          detail: current.title + ' 与 ' + next.title + ' 时间重叠。',
+          detail: current.title + ' 与 ' + compared.title + ' 时间重叠。',
         });
+        if (current.locationId && current.locationId === compared.locationId) {
+          output.push({
+            id: createUuid(),
+            kind: 'location',
+            severity: 'error',
+            day,
+            title: '地点占用冲突',
+            detail: current.title + ' 与 ' + compared.title + ' 同时占用同一地点。',
+          });
+        }
       }
       if (!next || current.locationId === next.locationId) continue;
       const requirement = travelBetween(state, current.locationId, next.locationId);
@@ -247,6 +356,65 @@ export function detectConflicts(state: AppState): ConflictItem[] {
       }
     });
 
+  state.students
+    .filter((student) => student.active !== false)
+    .forEach((student) => {
+      for (const day of [1, 2, 3, 4, 5, 6, 7] as WeekDay[]) {
+        const events = studentEventsForDay(state, student, day);
+        for (let index = 0; index < events.length - 1; index += 1) {
+          const current = events[index];
+          const next = events[index + 1];
+          if (overlap(current.startMinute, current.endMinute, next.startMinute, next.endMinute)) continue;
+          if (current.locationId === next.locationId) continue;
+          if (!current.locationId || !next.locationId) {
+            output.push({
+              id: createUuid(),
+              kind: 'commute',
+              severity: 'error',
+              day,
+              title: '学生安排缺少地点',
+              detail: student.name + ' 的“' + current.title + '”或“' + next.title + '”未设置地点，无法验证通勤。',
+            });
+            continue;
+          }
+          const requirement = travelBetween(state, current.locationId, next.locationId);
+          if (!requirement) {
+            output.push({
+              id: createUuid(),
+              kind: 'commute',
+              severity: 'error',
+              day,
+              title: '学生通勤时间未设置',
+              detail: student.name + ' 的“' + current.title + '”到“' + next.title + '”缺少方向性通勤记录。',
+            });
+            continue;
+          }
+          const available = next.startMinute - current.endMinute;
+          const required = requirement.minutes + requirement.bufferMinutes;
+          if (available < required) {
+            output.push({
+              id: createUuid(),
+              kind: 'commute',
+              severity: 'error',
+              day,
+              title: '学生通勤冲突',
+              detail:
+                student.name +
+                ' 从“' +
+                current.title +
+                '”到“' +
+                next.title +
+                '”只有 ' +
+                available +
+                ' 分钟，需要 ' +
+                required +
+                ' 分钟。',
+            });
+          }
+        }
+      }
+    });
+
   return output;
 }
 
@@ -265,6 +433,8 @@ export function computeCommonFree(state: AppState, studentIds: string[], duratio
         let adjust = 0;
         let hardAdjust = 0;
         let blocked = false;
+        let studentTravelMinutes = 0;
+        const travelWarnings: string[] = [];
         const reasons: Record<string, string> = {};
         students.forEach((student) => {
           if (!locationAllowed(student, location.id)) {
@@ -278,15 +448,33 @@ export function computeCommonFree(state: AppState, studentIds: string[], duratio
             reasons[student.id] = 'blocked';
             return;
           }
+          const travel = studentTravelFit(state, student, day, start, end, location.id);
+          if (travel.blocked) {
+            blocked = true;
+            reasons[student.id] = travel.reason || 'commuteBlocked';
+            return;
+          }
+          studentTravelMinutes += travel.minutes;
+          travelWarnings.push(...travel.warnings);
           adjust += penalty.adjust;
           hardAdjust += penalty.hardAdjust;
           reasons[student.id] = penalty.hardAdjust > 0 ? 'hardAdjust' : penalty.adjust > 0 ? 'adjust' : 'free';
         });
         if (blocked) continue;
         const movement = movePenalty(state, day, start, end, location.id);
-        const score = 100 - adjust * 12 - hardAdjust * 32 - movement.penalty + (location.priorityWeight || 1) * 2;
+        const score =
+          100 -
+          adjust * 12 -
+          hardAdjust * 32 -
+          movement.penalty -
+          studentTravelMinutes / 8 +
+          (location.priorityWeight || 1) * 2;
         const quality: CommonFreeWindow['quality'] =
-          hardAdjust > 0 ? '勉强可用' : adjust > 0 || movement.warnings > 0 ? '可接受' : '推荐';
+          hardAdjust > 0
+            ? '勉强可用'
+            : adjust > 0 || movement.warnings > 0 || travelWarnings.length > 0
+              ? '可接受'
+              : '推荐';
         windows.push({
           id: createUuid(),
           day,
@@ -295,10 +483,13 @@ export function computeCommonFree(state: AppState, studentIds: string[], duratio
           locationId: location.id,
           score,
           quality,
-          reasons: [quality, movement.warnings > 0 ? '通勤需确认' : ''].filter(Boolean),
+          reasons: [quality, movement.warnings > 0 ? '教师通勤需确认' : '', ...travelWarnings].filter(Boolean),
           adjustableStudents: adjust,
           hardAdjustStudents: hardAdjust,
           fixedConflictStudents: 0,
+          studentTravelMinutes,
+          teacherTravelMinutes: movement.travelMinutes,
+          travelWarnings,
           allStudents: students.map((student) => student.id),
           studentReasons: reasons,
         });
@@ -314,8 +505,11 @@ const rankForStrategy = (state: AppState, strategy: ScheduleProposal['strategy']
   return [...windows].sort((left, right) => {
     const score = (window: CommonFreeWindow) => {
       const movement = movePenalty(state, window.day, window.startMinute, window.endMinute, window.locationId);
-      if (strategy === '最少调学生') {
+      if (strategy === '冲突最少') {
         return window.score + weights.studentPreferred - window.adjustableStudents * 10 - window.hardAdjustStudents * weights.locked;
+      }
+      if (strategy === '学生通勤最少') {
+        return window.score - (window.studentTravelMinutes || 0) * (weights.travel / 30);
       }
       if (strategy === '教师最少通勤') {
         return window.score - movement.penalty * (weights.travel / 30);
@@ -368,12 +562,15 @@ export function generateProposals(state: AppState, studentIds: string[]): Schedu
       const score = plan.reduce((sum, item) => sum + item.score, 0) - movement;
       const hard = plan.reduce((sum, item) => sum + item.hardAdjustStudents, 0);
       const adjusted = plan.reduce((sum, item) => sum + item.adjustableStudents, 0);
+      const studentTravelMinutes = plan.reduce((sum, item) => sum + (item.studentTravelMinutes || 0), 0);
+      const teacherTravelMinutes = plan.reduce((sum, item) => sum + (item.teacherTravelMinutes || 0), 0);
       const warnings: string[] = [];
       if (hard > 0) warnings.push('方案包含高成本调课时段，需要教师确认。');
       if (movement > 0) warnings.push('方案含有通勤或场地切换成本。');
       if (plan.length < expectedSessions) {
         warnings.push('仅找到 ' + plan.length + ' 节可行时段，少于学生需求的 ' + expectedSessions + ' 节。');
       }
+      const completenessRate = Math.round((plan.length / expectedSessions) * 100);
       proposals.push({
         id: createUuid(),
         title: strategy + ' · ' + names,
@@ -385,11 +582,23 @@ export function generateProposals(state: AppState, studentIds: string[]): Schedu
           (plan.length * students.length - adjusted - hard) +
           ' 个学生时段无需调整，预计地点切换成本 ' +
           Math.round(movement) +
-          '。',
+          '；学生通勤与缓冲合计 ' +
+          Math.round(studentTravelMinutes) +
+          ' 分钟。',
         score,
         assignment: plan[0],
         assignments: plan,
         warnings,
+        breakdown: {
+          hardConflicts: 0,
+          requestedSessions: expectedSessions,
+          scheduledSessions: plan.length,
+          adjustedStudentSlots: adjusted,
+          hardAdjustmentSlots: hard,
+          studentTravelMinutes: Math.round(studentTravelMinutes),
+          teacherTravelMinutes: Math.round(teacherTravelMinutes),
+          completenessRate,
+        },
       });
     }
   });
@@ -400,4 +609,104 @@ export function generateProposals(state: AppState, studentIds: string[]): Schedu
     if (!unique.has(key)) unique.set(key, proposal);
   });
   return [...unique.values()].sort((left, right) => right.score - left.score);
+}
+
+const targetGroupSizeFor = (student: Student) => {
+  if (student.classType === '一对二') return 2;
+  if (student.classType === '一对三') return 3;
+  if (student.classType === '小班' || student.classType === '已有固定班课') {
+    return Math.max(2, Math.min(6, student.targetStudentCount || 4));
+  }
+  return Math.max(2, Math.min(6, student.targetStudentCount || 3));
+};
+
+const classTypeForSize = (size: number): Student['classType'] => {
+  if (size <= 1) return '一对一';
+  if (size === 2) return '一对二';
+  if (size === 3) return '一对三';
+  return '小班';
+};
+
+const commonAcceptedLocations = (state: AppState, students: Student[]) => {
+  const activeIds = state.locations.filter((location) => location.active !== false).map((location) => location.id);
+  return students.reduce<string[]>((current, student) => {
+    const accepted = student.acceptedLocationIds.length ? student.acceptedLocationIds : activeIds;
+    return current.filter((id) => accepted.includes(id));
+  }, activeIds);
+};
+
+const groupCompatible = (left: Student, right: Student) =>
+  left.grade.trim() === right.grade.trim() &&
+  (left.lessonMinutes || 60) === (right.lessonMinutes || 60) &&
+  (left.weeklySessionNeed || 1) === (right.weeklySessionNeed || 1);
+
+export function generateGroupSuggestions(state: AppState): GroupSuggestion[] {
+  const assignedStudentIds = new Set(
+    state.classes
+      .filter((classItem) => classItem.status === 'active')
+      .flatMap((classItem) => classItem.studentIds)
+  );
+  const pool = state.students.filter(
+    (student) =>
+      student.active !== false &&
+      student.classType !== '一对一' &&
+      !assignedStudentIds.has(student.id)
+  );
+  const consumed = new Set<string>();
+  const suggestions: GroupSuggestion[] = [];
+
+  for (const seed of pool) {
+    if (consumed.has(seed.id)) continue;
+    const targetStudentCount = targetGroupSizeFor(seed);
+    const group = [seed];
+
+    while (group.length < targetStudentCount) {
+      const candidates = pool
+        .filter(
+          (candidate) =>
+            !consumed.has(candidate.id) &&
+            !group.some((student) => student.id === candidate.id) &&
+            group.every((student) => groupCompatible(student, candidate)) &&
+            commonAcceptedLocations(state, [...group, candidate]).length > 0
+        )
+        .map((candidate) => {
+          const windows = computeCommonFree(state, [...group.map((student) => student.id), candidate.id]);
+          return { candidate, windows, score: windows[0]?.score ?? Number.NEGATIVE_INFINITY };
+        })
+        .filter((item) => item.windows.length > 0)
+        .sort((left, right) => right.score - left.score);
+      if (!candidates.length) break;
+      group.push(candidates[0].candidate);
+    }
+
+    if (group.length < 2) continue;
+    const windows = computeCommonFree(state, group.map((student) => student.id));
+    if (!windows.length) continue;
+    group.forEach((student) => consumed.add(student.id));
+    const bestWindow = windows[0];
+    const warnings: string[] = [];
+    if (group.length < targetStudentCount) {
+      warnings.push('当前找到 ' + group.length + ' 人，低于目标 ' + targetStudentCount + ' 人，可继续补充成员。');
+    }
+    suggestions.push({
+      id: createUuid(),
+      title: (seed.grade || '未分年级') + ' · ' + group.length + ' 人候选班',
+      studentIds: group.map((student) => student.id),
+      grade: seed.grade,
+      classType: classTypeForSize(group.length),
+      targetStudentCount,
+      score: bestWindow.score + Math.min(30, windows.length / 4),
+      commonWindowCount: windows.length,
+      bestWindow,
+      reasons: [
+        '成员年级一致',
+        '每周次数与课时长度一致',
+        '共同接受地点 ' + commonAcceptedLocations(state, group).length + ' 个',
+        '可行时间地点组合 ' + windows.length + ' 个',
+      ],
+      warnings,
+    });
+  }
+
+  return suggestions.sort((left, right) => right.score - left.score);
 }

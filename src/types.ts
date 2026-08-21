@@ -261,17 +261,46 @@ export interface CommonFreeWindow {
   adjustableStudents: number;
   hardAdjustStudents: number;
   fixedConflictStudents: number;
+  studentTravelMinutes?: number;
+  teacherTravelMinutes?: number;
+  travelWarnings?: string[];
   allStudents: string[];
   studentReasons: Record<string, string>;
+}
+
+export interface ScheduleScoreBreakdown {
+  hardConflicts: number;
+  requestedSessions: number;
+  scheduledSessions: number;
+  adjustedStudentSlots: number;
+  hardAdjustmentSlots: number;
+  studentTravelMinutes: number;
+  teacherTravelMinutes: number;
+  completenessRate: number;
 }
 
 export interface ScheduleProposal {
   id: string;
   title: string;
-  strategy: '最少调学生' | '教师最少通勤' | '课程更集中';
+  strategy: '冲突最少' | '学生通勤最少' | '教师最少通勤' | '课程更集中';
   explanation: string;
   score: number;
   assignment: CommonFreeWindow;
   assignments?: CommonFreeWindow[];
+  warnings: string[];
+  breakdown: ScheduleScoreBreakdown;
+}
+
+export interface GroupSuggestion {
+  id: string;
+  title: string;
+  studentIds: string[];
+  grade: string;
+  classType: ClassType;
+  targetStudentCount: number;
+  score: number;
+  commonWindowCount: number;
+  bestWindow: CommonFreeWindow;
+  reasons: string[];
   warnings: string[];
 }

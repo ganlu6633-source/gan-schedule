@@ -5,6 +5,7 @@ import {
   ClassProfile,
   IntakeSubmission,
   ConflictItem,
+  GroupSuggestion,
   ScheduleProposal,
   Student,
   TeacherCourse,
@@ -12,7 +13,7 @@ import {
   WEEK_LABELS,
   WeekDay,
 } from '../types';
-import { detectConflicts, computeCommonFree, generateProposals } from '../services/scheduler';
+import { detectConflicts, computeCommonFree, generateGroupSuggestions, generateProposals } from '../services/scheduler';
 import { TimeGridEditor } from './TimeGridEditor';
 import { DAY_END_MIN, DAY_START_MIN, SLOT_MINUTES, formatMinute, toSlotKey, overlap } from '../utils/time';
 import { createUuid } from '../utils/id';
@@ -102,6 +103,7 @@ export function TeacherPortal({
   const [selectedStudentIds, setSelectedStudentIds] = React.useState<string[]>([]);
   const [editor, setEditor] = React.useState<Student | null>(null);
   const [proposals, setProposals] = React.useState<ScheduleProposal[]>([]);
+  const [groupSuggestions, setGroupSuggestions] = React.useState<GroupSuggestion[]>([]);
   const [courseDraft, setCourseDraft] = React.useState(() => emptyCourseDraft(state));
   const [classDraft, setClassDraft] = React.useState<ClassProfile | null>(null);
   const [teacherAvailability, setTeacherAvailability] = React.useState<Record<string, TeacherTimeStatus>>(state.teacherAvailability);
@@ -142,7 +144,10 @@ export function TeacherPortal({
     }
   }, [submissionDraftId, submissionDraft]);
 
-  const conflicts = React.useMemo(() => detectConflicts(state), [state.teacherCourses, state.teacherAvailability, state.students]);
+  const conflicts = React.useMemo(
+    () => detectConflicts(state),
+    [state.teacherCourses, state.teacherAvailability, state.students, state.locations, state.travelTimes, state.classes]
+  );
 
   const filteredStudents = React.useMemo(() => {
     return state.students.filter((student) => {
@@ -192,6 +197,15 @@ export function TeacherPortal({
 
   const createProposal = () => {
     setProposals(selectedStudentIds.length ? generateProposals(state, selectedStudentIds) : []);
+  };
+
+  const createGroupSuggestions = () => {
+    setGroupSuggestions(generateGroupSuggestions(state));
+  };
+
+  const useGroupSuggestion = (suggestion: GroupSuggestion) => {
+    setSelectedStudentIds(suggestion.studentIds);
+    setProposals(generateProposals(state, suggestion.studentIds));
   };
 
   const applyProposal = (proposal: ScheduleProposal) => {
@@ -494,6 +508,44 @@ export function TeacherPortal({
             })()
           ))}
 
+          <div className="functional-summary">
+            <div>
+              <strong>自动组班</strong>
+              <span>按年级、课时、每周次数、共同地点和完整通勤约束计算。</span>
+            </div>
+            <button onClick={createGroupSuggestions}>生成组班建议</button>
+          </div>
+          {groupSuggestions.length > 0 && (
+            <div className="group-suggestion-grid" aria-label="自动组班建议">
+              {groupSuggestions.map((suggestion) => (
+                <article className="group-suggestion" key={suggestion.id}>
+                  <div className="proposal-heading">
+                    <h3>{suggestion.title}</h3>
+                    <strong>{Math.round(suggestion.score)} 分</strong>
+                  </div>
+                  <p>
+                    {suggestion.studentIds
+                      .map((id) => state.students.find((student) => student.id === id)?.name || id)
+                      .join('、')}
+                  </p>
+                  <p>
+                    推荐时段：{WEEK_LABELS[suggestion.bestWindow.day]} {formatMinute(suggestion.bestWindow.startMinute)}-
+                    {formatMinute(suggestion.bestWindow.endMinute)} ·{' '}
+                    {state.locations.find((location) => location.id === suggestion.bestWindow.locationId)?.name || '未设置地点'}
+                  </p>
+                  <p className="tiny">{suggestion.reasons.join('；')}</p>
+                  {suggestion.warnings.map((warning) => (
+                    <p className="warning-note" key={warning}>{warning}</p>
+                  ))}
+                  <button onClick={() => useGroupSuggestion(suggestion)}>采用成员并生成排课方案</button>
+                </article>
+              ))}
+            </div>
+          )}
+          {groupSuggestions.length === 0 && (
+            <p className="tiny">尚未计算组班建议；已进入正式班级的学生不会被重复推荐。</p>
+          )}
+
           <h2>学生列表选择</h2>
           <ul className="list">
             {state.students.map((student) => (
@@ -535,17 +587,39 @@ export function TeacherPortal({
           <div className="proposals">
             {proposals.map((item) => (
               <article className="proposal-card" key={item.id}>
-                <h4>{item.title}</h4>
+                <div className="proposal-heading">
+                  <h4>{item.title}</h4>
+                  <strong>{Math.round(item.score)} 分</strong>
+                </div>
                 <p>策略：{item.strategy}</p>
                 <p>{item.explanation}</p>
-                <p>评分：{item.score}</p>
-                {item.warnings.length > 0 && <p>{item.warnings.join('；')}</p>}
+                <div className="metric-strip">
+                  <span>硬冲突 {item.breakdown.hardConflicts}</span>
+                  <span>完成率 {item.breakdown.completenessRate}%</span>
+                  <span>需调整 {item.breakdown.adjustedStudentSlots + item.breakdown.hardAdjustmentSlots}</span>
+                  <span>学生通勤 {item.breakdown.studentTravelMinutes} 分钟</span>
+                  <span>教师通勤 {item.breakdown.teacherTravelMinutes} 分钟</span>
+                </div>
+                <div className="proposal-assignments">
+                  {(item.assignments || [item.assignment]).map((assignment) => (
+                    <span key={assignment.id}>
+                      {WEEK_LABELS[assignment.day]} {formatMinute(assignment.startMinute)}-{formatMinute(assignment.endMinute)} ·{' '}
+                      {state.locations.find((location) => location.id === assignment.locationId)?.name || '未设置地点'}
+                    </span>
+                  ))}
+                </div>
+                {item.warnings.length > 0 && <p className="warning-note">{item.warnings.join('；')}</p>}
                 <button onClick={() => applyProposal(item)}>应用到周课表</button>
               </article>
             ))}
           </div>
 
           <h2>冲突检测</h2>
+          <div className="severity-summary">
+            <span>硬冲突：{conflicts.filter((item) => item.severity === 'error').length}</span>
+            <span>提醒：{conflicts.filter((item) => item.severity === 'warning').length}</span>
+            <span>学生/通勤：{conflicts.filter((item) => item.kind === 'student' || item.kind === 'commute').length}</span>
+          </div>
           <ul className="list">
             {conflicts.length === 0 && <li>暂无冲突</li>}
             {conflicts.map((item: ConflictItem) => (
@@ -1025,7 +1099,14 @@ export function TeacherPortal({
                         {WEEK_LABELS[course.day]} {formatMinute(course.startMinute)}-{formatMinute(course.endMinute)} ·{' '}
                         {state.locations.find((loc) => loc.id === course.locationId)?.name}
                       </p>
-                      <p>学生：{course.studentIds.length ? course.studentIds.join('、') : '未绑定学生'}</p>
+                      <p>
+                        学生：
+                        {course.studentIds.length
+                          ? course.studentIds
+                              .map((id) => state.students.find((student) => student.id === id)?.name || id)
+                              .join('、')
+                          : '未绑定学生'}
+                      </p>
                       <p>来源：{course.source === 'proposal' ? '智能排课' : '手工'}</p>
                     </div>
                     <div className="row-actions">

@@ -311,6 +311,90 @@ button.danger {
   margin-bottom: 8px;
 }
 
+.functional-summary,
+.proposal-heading,
+.severity-summary,
+.metric-strip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.functional-summary {
+  justify-content: space-between;
+  margin: 18px 0 10px;
+  padding: 14px;
+  border: 1px solid #cfd9e7;
+  border-radius: 12px;
+  background: #f7faff;
+}
+
+.functional-summary div {
+  display: grid;
+  gap: 4px;
+}
+
+.functional-summary span {
+  color: var(--soft);
+  font-size: 13px;
+}
+
+.functional-summary button,
+.group-suggestion button,
+.proposal-card button {
+  width: auto;
+}
+
+.group-suggestion-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+.group-suggestion {
+  padding: 13px;
+  border: 1px solid #cdd9e7;
+  border-radius: 12px;
+  background: #fff;
+}
+
+.proposal-heading {
+  justify-content: space-between;
+}
+
+.proposal-heading h3,
+.proposal-heading h4 {
+  margin: 0;
+}
+
+.metric-strip,
+.severity-summary {
+  margin: 10px 0;
+}
+
+.metric-strip span,
+.severity-summary span,
+.proposal-assignments span {
+  padding: 6px 9px;
+  border-radius: 8px;
+  background: #edf3fb;
+  color: #334966;
+  font-size: 12px;
+}
+
+.proposal-assignments {
+  display: grid;
+  gap: 6px;
+  margin: 10px 0;
+}
+
+.warning-note {
+  color: #9a5a00;
+  font-size: 13px;
+}
+
 .toolbar {
   display: flex;
   gap: 10px;

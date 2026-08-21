@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { computeCommonFree, detectConflicts, generateProposals } from '../src/services/scheduler';
+import { computeCommonFree, detectConflicts, generateGroupSuggestions, generateProposals } from '../src/services/scheduler';
 import { overlap, toSlotKey } from '../src/utils/time';
 import type { AppState, Student, WeekDay } from '../src/types';
 
@@ -173,5 +173,39 @@ describe('排课时间与冲突规则', () => {
         (proposal.assignments || []).some((assignment) => assignment.day === 1 && assignment.startMinute < 10 * 60)
       )
     ).toBe(false);
+  });
+
+  it('共同空闲把学生相邻课程的方向性通勤作为硬约束', () => {
+    const state = makeState();
+    state.students[0] = student('stu-a', {
+      originalCourses: [
+        {
+          id: 'before',
+          title: '前一地点课程',
+          day: 1,
+          startMinute: 10 * 60,
+          endMinute: 11 * 60,
+          locationId: 'loc-a',
+          isFixed: true,
+          adjustDifficulty: 1,
+        },
+      ],
+    });
+    const windows = computeCommonFree(state, ['stu-a'], 60);
+    expect(
+      windows.some((window) => window.day === 1 && window.startMinute === 11 * 60 + 30 && window.locationId === 'loc-b')
+    ).toBe(false);
+    expect(
+      windows.some((window) => window.day === 1 && window.startMinute === 11 * 60 + 30 && window.locationId === 'loc-a')
+    ).toBe(true);
+  });
+
+  it('自动组班只组合基础条件兼容且存在共同可行时段的学生', () => {
+    const state = makeState();
+    state.students.push(student('stu-c', { grade: '高二' }));
+    const suggestions = generateGroupSuggestions(state);
+    expect(suggestions.length).toBeGreaterThan(0);
+    expect(suggestions[0].studentIds.sort()).toEqual(['stu-a', 'stu-b']);
+    expect(suggestions[0].studentIds).not.toContain('stu-c');
   });
 });
