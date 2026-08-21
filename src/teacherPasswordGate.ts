@@ -23,6 +23,22 @@ function removeGate() {
   document.getElementById(gateId)?.remove();
 }
 
+function showLoginGate(gate: HTMLElement) {
+  gate.classList.remove('is-loading');
+  const title = gate.querySelector<HTMLElement>('#teacher-code-title');
+  const intro = gate.querySelector<HTMLElement>('.teacher-code-intro');
+  if (title) title.textContent = '教师登录';
+  if (intro) intro.textContent = '填写本次使用的教师名称，再输入教师密码即可进入。';
+}
+
+function showLoadingGate(gate: HTMLElement) {
+  gate.classList.add('is-loading');
+  const title = gate.querySelector<HTMLElement>('#teacher-code-title');
+  const intro = gate.querySelector<HTMLElement>('.teacher-code-intro');
+  if (title) title.textContent = '正在进入教师工作台';
+  if (intro) intro.textContent = '账号已经验证，正在安全加载排课数据。';
+}
+
 function createGate() {
   const existing = document.getElementById(gateId);
   if (existing) return existing;
@@ -138,7 +154,16 @@ async function syncTeacherGate() {
   syncing = true;
   try {
     const { data } = await teacherAuth.auth.getSession();
-    if (data.session) removeGate();
+    if (!data.session) {
+      showLoginGate(createGate());
+      return;
+    }
+    const pageText = document.body.textContent || '';
+    if (pageText.includes('教师工作台已同步。')) {
+      removeGate();
+    } else {
+      showLoadingGate(createGate());
+    }
   } finally {
     syncing = false;
   }
