@@ -637,6 +637,9 @@ const commonAcceptedLocations = (state: AppState, students: Student[]) => {
 
 const groupCompatible = (left: Student, right: Student) =>
   left.grade.trim() === right.grade.trim() &&
+  (!left.courseNeed?.trim() ||
+    !right.courseNeed?.trim() ||
+    left.courseNeed.trim().toLowerCase() === right.courseNeed.trim().toLowerCase()) &&
   (left.lessonMinutes || 60) === (right.lessonMinutes || 60) &&
   (left.weeklySessionNeed || 1) === (right.weeklySessionNeed || 1);
 
@@ -700,6 +703,7 @@ export function generateGroupSuggestions(state: AppState): GroupSuggestion[] {
       bestWindow,
       reasons: [
         '成员年级一致',
+        '课程需求兼容',
         '每周次数与课时长度一致',
         '共同接受地点 ' + commonAcceptedLocations(state, group).length + ' 个',
         '可行时间地点组合 ' + windows.length + ' 个',

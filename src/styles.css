@@ -395,6 +395,40 @@ button.danger {
   font-size: 13px;
 }
 
+.operation-message {
+  position: sticky;
+  top: 8px;
+  z-index: 20;
+  margin: 10px 0;
+  padding: 10px 13px;
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+}
+
+.operation-message.success {
+  color: #176040;
+  background: #e9f8ef;
+  border: 1px solid #b9dfc7;
+}
+
+.operation-message.error {
+  color: #8d2d22;
+  background: #fff0ed;
+  border: 1px solid #f2c1b9;
+}
+
+.operation-message.saving {
+  color: #385170;
+  background: #eef4fc;
+  border: 1px solid #cbd9eb;
+}
+
+.settings-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 10px;
+}
+
 .toolbar {
   display: flex;
   gap: 10px;

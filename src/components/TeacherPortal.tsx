@@ -74,6 +74,8 @@ type TeacherPortalProps = {
   state: AppState;
   onUpdate(next: AppState): Promise<AppState> | void;
   onApplyProposal(proposal: ScheduleProposal): Promise<void> | void;
+  onGenerateProposals(studentIds: string[]): Promise<ScheduleProposal[]>;
+  onSaveTeacherAvailability(value: Record<string, TeacherTimeStatus>): Promise<void>;
   onAcceptSubmission(id: string, forceCreate?: boolean): Promise<void>;
   onMergeSubmission(id: string, targetStudentId: string): Promise<void>;
   onIgnoreSubmission(id: string): Promise<void>;
@@ -88,6 +90,8 @@ export function TeacherPortal({
   state,
   onUpdate,
   onApplyProposal,
+  onGenerateProposals,
+  onSaveTeacherAvailability,
   onAcceptSubmission,
   onMergeSubmission,
   onIgnoreSubmission,
@@ -97,9 +101,11 @@ export function TeacherPortal({
   submissionDraft,
   submissionDraftId,
 }: TeacherPortalProps) {
-  const [tab, setTab] = React.useState<'dashboard' | 'students' | 'classes' | 'schedule' | 'locations'>('dashboard');
+  const [tab, setTab] = React.useState<'dashboard' | 'students' | 'classes' | 'schedule' | 'locations' | 'settings'>('dashboard');
   const [search, setSearch] = React.useState('');
   const [classFilter, setClassFilter] = React.useState<ClassType | '全部'>('全部');
+  const [gradeFilter, setGradeFilter] = React.useState('全部');
+  const [locationFilter, setLocationFilter] = React.useState('全部');
   const [selectedStudentIds, setSelectedStudentIds] = React.useState<string[]>([]);
   const [editor, setEditor] = React.useState<Student | null>(null);
   const [proposals, setProposals] = React.useState<ScheduleProposal[]>([]);
@@ -112,6 +118,12 @@ export function TeacherPortal({
   const [newLocationNote, setNewLocationNote] = React.useState('');
   const [mergeTargetMap, setMergeTargetMap] = React.useState<Record<string, string>>({});
   const [editingSubmission, setEditingSubmission] = React.useState<string | null>(null);
+  const [busy, setBusy] = React.useState(false);
+  const [operationMessage, setOperationMessage] = React.useState<{ kind: 'success' | 'error'; text: string } | null>(null);
+  const [settingsDraft, setSettingsDraft] = React.useState(
+    state.optimizerSettings || { weights: {}, rules: {} }
+  );
+  const availabilityTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const normalizeStudentName = (name: string) => name.trim().toLowerCase();
 
@@ -144,6 +156,17 @@ export function TeacherPortal({
     }
   }, [submissionDraftId, submissionDraft]);
 
+  React.useEffect(() => {
+    if (state.optimizerSettings) setSettingsDraft(state.optimizerSettings);
+  }, [state.optimizerSettings]);
+
+  React.useEffect(
+    () => () => {
+      if (availabilityTimer.current) clearTimeout(availabilityTimer.current);
+    },
+    []
+  );
+
   const conflicts = React.useMemo(
     () => detectConflicts(state),
     [state.teacherCourses, state.teacherAvailability, state.students, state.locations, state.travelTimes, state.classes]
@@ -153,23 +176,71 @@ export function TeacherPortal({
     return state.students.filter((student) => {
       if (search.trim() && !student.name.includes(search.trim())) return false;
       if (classFilter !== '全部' && student.classType !== classFilter) return false;
+      if (gradeFilter !== '全部' && student.grade !== gradeFilter) return false;
+      if (
+        locationFilter !== '全部' &&
+        student.acceptedLocationIds.length > 0 &&
+        !student.acceptedLocationIds.includes(locationFilter)
+      ) return false;
       return true;
     });
-  }, [state.students, search, classFilter]);
+  }, [state.students, search, classFilter, gradeFilter, locationFilter]);
+
+  const gradeOptions = React.useMemo(
+    () => Array.from(new Set(state.students.map((student) => student.grade).filter(Boolean))).sort(),
+    [state.students]
+  );
 
   const commonWindows = React.useMemo(() => {
     if (selectedStudentIds.length === 0) return [];
     return computeCommonFree(state, selectedStudentIds);
   }, [selectedStudentIds, state]);
 
-  const countIncomplete = state.students.filter((student) => !student.name || !student.classType).length;
+  const studentCompleteness = (student: Student) => {
+    const fields = [
+      student.name,
+      student.grade,
+      student.school,
+      student.courseNeed,
+      student.classType,
+      student.weeklySessionNeed,
+      student.lessonMinutes,
+      student.acceptedLocationIds.length > 0,
+      Object.keys(student.availability).length > 0,
+    ];
+    return Math.round((fields.filter(Boolean).length / fields.length) * 100);
+  };
+
+  const countIncomplete = state.students.filter((student) => studentCompleteness(student) < 80).length;
 
   const saveState = async (next: AppState): Promise<AppState> => {
-    const result = onUpdate(next);
-    if (result && typeof (result as any).then === 'function') {
-      return (await result) as AppState;
+    setBusy(true);
+    setOperationMessage(null);
+    try {
+      const result = onUpdate(next);
+      const saved = result && typeof (result as any).then === 'function' ? ((await result) as AppState) : next;
+      setOperationMessage({ kind: 'success', text: '已保存到云端。' });
+      return saved;
+    } catch (error: any) {
+      setOperationMessage({ kind: 'error', text: error?.message || '保存失败，请检查网络后重试。' });
+      return state;
+    } finally {
+      setBusy(false);
     }
-    return next;
+  };
+
+  const runAction = async (action: () => Promise<void>, successText?: string) => {
+    if (busy) return;
+    setBusy(true);
+    setOperationMessage(null);
+    try {
+      await action();
+      if (successText) setOperationMessage({ kind: 'success', text: successText });
+    } catch (error: any) {
+      setOperationMessage({ kind: 'error', text: error?.message || '操作失败，请检查网络后重试。' });
+    } finally {
+      setBusy(false);
+    }
   };
 
   const toggleSelectStudent = (id: string) => {
@@ -195,25 +266,39 @@ export function TeacherPortal({
     setEditor(null);
   };
 
-  const createProposal = () => {
-    setProposals(selectedStudentIds.length ? generateProposals(state, selectedStudentIds) : []);
+  const createProposal = async () => {
+    if (!selectedStudentIds.length) {
+      setOperationMessage({ kind: 'error', text: '请至少选择一名学生。' });
+      return;
+    }
+    await runAction(async () => {
+      setProposals(await onGenerateProposals(selectedStudentIds));
+    });
   };
 
   const createGroupSuggestions = () => {
     setGroupSuggestions(generateGroupSuggestions(state));
   };
 
-  const useGroupSuggestion = (suggestion: GroupSuggestion) => {
+  const useGroupSuggestion = async (suggestion: GroupSuggestion) => {
     setSelectedStudentIds(suggestion.studentIds);
-    setProposals(generateProposals(state, suggestion.studentIds));
+    await runAction(async () => {
+      setProposals(await onGenerateProposals(suggestion.studentIds));
+    });
   };
 
   const applyProposal = (proposal: ScheduleProposal) => {
-    void onApplyProposal(proposal);
+    void runAction(async () => {
+      await onApplyProposal(proposal);
+      setProposals([]);
+    }, '方案已应用并重新读取云端课表。');
   };
 
-  const submitCourse = () => {
-    if (!courseDraft.locationId) return;
+  const submitCourse = async () => {
+    if (!courseDraft.locationId || courseDraft.endMinute <= courseDraft.startMinute || courseDraft.studentIds.length === 0) {
+      setOperationMessage({ kind: 'error', text: '请设置有效时间、地点，并至少选择一名课程成员。' });
+      return;
+    }
     const courseId = courseDraft.id ?? createUuid();
     const nextCourse: TeacherCourse = {
       id: courseId,
@@ -235,8 +320,12 @@ export function TeacherPortal({
     const idx = nextCourses.findIndex((item) => item.id === courseId);
     if (idx >= 0) nextCourses[idx] = nextCourse;
     else nextCourses.push(nextCourse);
-    void saveState({ ...state, teacherCourses: nextCourses });
-    setCourseDraft(emptyCourseDraft(state));
+    const nextState = { ...state, teacherCourses: nextCourses };
+    const newErrors = detectConflicts(nextState).filter((item) => item.severity === 'error');
+    const currentErrors = conflicts.filter((item) => item.severity === 'error');
+    if (newErrors.length > currentErrors.length && !window.confirm(`这次修改会产生 ${newErrors.length} 个硬冲突，仍要保存吗？`)) return;
+    const saved = await saveState(nextState);
+    if (saved.teacherCourses.some((course) => course.id === courseId)) setCourseDraft(emptyCourseDraft(saved));
   };
 
   const removeCourse = (id: string) => {
@@ -256,7 +345,7 @@ export function TeacherPortal({
     setClassDraft(target ? { ...target } : null);
   };
 
-  const saveClassDraft = () => {
+  const saveClassDraft = async () => {
     if (!classDraft) return;
     if (!classDraft.title.trim()) {
       return;
@@ -277,8 +366,8 @@ export function TeacherPortal({
     } else {
       next.unshift(nextClass);
     }
-    void saveState({ ...state, classes: next });
-    setClassDraft(null);
+    const saved = await saveState({ ...state, classes: next });
+    if (saved.classes.some((item) => item.id === nextClass.id)) setClassDraft(null);
   };
 
   const removeClass = (id: string) => {
@@ -364,7 +453,10 @@ export function TeacherPortal({
 
   const updateTeacherAvailability = (next: Record<string, TeacherTimeStatus>) => {
     setTeacherAvailability(next);
-    void saveState({ ...state, teacherAvailability: next });
+    if (availabilityTimer.current) clearTimeout(availabilityTimer.current);
+    availabilityTimer.current = setTimeout(() => {
+      void runAction(async () => onSaveTeacherAvailability(next), '教师时间已保存。');
+    }, 700);
   };
 
   const handleCancelEditor = () => {
@@ -396,9 +488,15 @@ export function TeacherPortal({
           周课表
         </button>
         <button className={tab === 'locations' ? 'active' : ''} onClick={() => setTab('locations')}>
-          地点
+          地点/通勤
+        </button>
+        <button className={tab === 'settings' ? 'active' : ''} onClick={() => setTab('settings')}>
+          设置
         </button>
       </div>
+
+      {operationMessage && <p className={`operation-message ${operationMessage.kind}`}>{operationMessage.text}</p>}
+      {busy && <p className="operation-message saving">正在处理，请勿重复操作...</p>}
 
       {tab === 'dashboard' && (
         <section className="card">
@@ -447,12 +545,12 @@ export function TeacherPortal({
                   <div className="row-actions">
                     {hasSameName ? (
                       <>
-                        <button onClick={() => onAcceptSubmission(submission.id, true)}>新建（同名允许）</button>
+                        <button disabled={busy} onClick={() => void runAction(() => onAcceptSubmission(submission.id, true))}>新建（同名允许）</button>
                         <button onClick={() => onStartSubmissionEdit(submission.id)}>编辑后接受</button>
                         <button
                           className="danger"
                           onClick={() => {
-                            if (window.confirm('忽略该学生提交？该操作会归档提交。')) void onIgnoreSubmission(submission.id);
+                            if (window.confirm('忽略该学生提交？该操作会归档提交。')) void runAction(() => onIgnoreSubmission(submission.id));
                           }}
                         >
                           忽略
@@ -460,12 +558,12 @@ export function TeacherPortal({
                       </>
                     ) : (
                       <>
-                        <button onClick={() => onAcceptSubmission(submission.id)}>接收并加入学生库</button>
+                        <button disabled={busy} onClick={() => void runAction(() => onAcceptSubmission(submission.id))}>接收并加入学生库</button>
                         <button onClick={() => onStartSubmissionEdit(submission.id)}>编辑后接受</button>
                         <button
                           className="danger"
                           onClick={() => {
-                            if (window.confirm('忽略该学生提交？该操作会归档提交。')) void onIgnoreSubmission(submission.id);
+                            if (window.confirm('忽略该学生提交？该操作会归档提交。')) void runAction(() => onIgnoreSubmission(submission.id));
                           }}
                         >
                           忽略
@@ -496,7 +594,7 @@ export function TeacherPortal({
                         </option>
                       ))}
                     </select>
-                    <button disabled={!selectedTarget} onClick={() => onMergeSubmission(submission.id, selectedTarget)}>
+                    <button disabled={!selectedTarget || busy} onClick={() => void runAction(() => onMergeSubmission(submission.id, selectedTarget))}>
                       合并到已有学生
                     </button>
                     <button className="danger" onClick={() => setMergeTargetMap((prev) => ({ ...prev, [submission.id]: '' }))}>
@@ -513,7 +611,7 @@ export function TeacherPortal({
               <strong>自动组班</strong>
               <span>按年级、课时、每周次数、共同地点和完整通勤约束计算。</span>
             </div>
-            <button onClick={createGroupSuggestions}>生成组班建议</button>
+            <button disabled={busy} onClick={createGroupSuggestions}>生成组班建议</button>
           </div>
           {groupSuggestions.length > 0 && (
             <div className="group-suggestion-grid" aria-label="自动组班建议">
@@ -537,7 +635,7 @@ export function TeacherPortal({
                   {suggestion.warnings.map((warning) => (
                     <p className="warning-note" key={warning}>{warning}</p>
                   ))}
-                  <button onClick={() => useGroupSuggestion(suggestion)}>采用成员并生成排课方案</button>
+                  <button disabled={busy} onClick={() => void useGroupSuggestion(suggestion)}>采用成员并生成排课方案</button>
                 </article>
               ))}
             </div>
@@ -564,7 +662,7 @@ export function TeacherPortal({
           </ul>
 
           <div className="actions">
-            <button onClick={createProposal}>计算共同空闲和生成方案</button>
+            <button disabled={busy} onClick={() => void createProposal()}>智能排课并记录运行</button>
           </div>
 
           <h2>共同空闲时间</h2>
@@ -609,7 +707,7 @@ export function TeacherPortal({
                   ))}
                 </div>
                 {item.warnings.length > 0 && <p className="warning-note">{item.warnings.join('；')}</p>}
-                <button onClick={() => applyProposal(item)}>应用到周课表</button>
+                <button disabled={busy} onClick={() => applyProposal(item)}>应用到周课表</button>
               </article>
             ))}
           </div>
@@ -640,6 +738,16 @@ export function TeacherPortal({
                 <option key={type}>{type}</option>
               ))}
             </select>
+            <select value={gradeFilter} onChange={(e) => setGradeFilter(e.target.value)}>
+              <option value="全部">全部年级</option>
+              {gradeOptions.map((grade) => <option key={grade} value={grade}>{grade}</option>)}
+            </select>
+            <select value={locationFilter} onChange={(e) => setLocationFilter(e.target.value)}>
+              <option value="全部">全部地点</option>
+              {state.locations.filter((location) => location.active !== false).map((location) => (
+                <option key={location.id} value={location.id}>{location.name}</option>
+              ))}
+            </select>
             <button onClick={() => setEditor(createEmptyStudent(state))}>新增学生</button>
           </div>
 
@@ -649,21 +757,24 @@ export function TeacherPortal({
                 <div>
                   <h3>{student.name}</h3>
                   <p>{student.grade}</p>
-                  <p>{student.classType}</p>
+                  <p>{student.school || '学校未登记'} · {student.classType}</p>
+                  <p>课程需求：{student.courseNeed || '未登记'} · 每周 {student.weeklySessionNeed || 1} 次 · {student.lessonMinutes || 60} 分钟</p>
+                  <p>信息完整度：{studentCompleteness(student)}%</p>
                   <p>最后更新：{new Date(student.updatedAt).toLocaleString()}</p>
                 </div>
                 <div className="row-actions">
                   <button onClick={() => setEditor(student)}>查看/编辑</button>
-                  <button
-                    className="danger"
-                    onClick={() =>
-                      saveState({
-                        ...state,
-                        students: state.students.filter((item) => item.id !== student.id),
-                      })
-                    }
-                  >
-                    删除
+                    <button
+                      className="danger"
+                      onClick={() => {
+                        if (!window.confirm(`停用学生“${student.name}”？历史班级和课程不会删除。`)) return;
+                        void saveState({
+                          ...state,
+                          students: state.students.map((item) => item.id === student.id ? { ...item, active: false } : item),
+                        });
+                      }}
+                    >
+                    停用
                   </button>
                 </div>
               </div>
@@ -685,6 +796,30 @@ export function TeacherPortal({
                 联系方式
                 <input value={editor.contact ?? ''} onChange={(e) => setEditor({ ...editor, contact: e.target.value })} />
               </label>
+              <label>
+                学校
+                <input value={editor.school ?? ''} onChange={(e) => setEditor({ ...editor, school: e.target.value })} />
+              </label>
+              <label>
+                课程需求
+                <input value={editor.courseNeed ?? ''} onChange={(e) => setEditor({ ...editor, courseNeed: e.target.value })} />
+              </label>
+              <div className="row">
+                <label>
+                  每周次数
+                  <input type="number" min={1} max={7} value={editor.weeklySessionNeed || 1} onChange={(e) => setEditor({ ...editor, weeklySessionNeed: Number(e.target.value) || 1 })} />
+                </label>
+                <label>
+                  单节时长
+                  <select value={editor.lessonMinutes || 60} onChange={(e) => setEditor({ ...editor, lessonMinutes: Number(e.target.value) })}>
+                    {[60, 90, 120, 150, 180].map((minutes) => <option key={minutes} value={minutes}>{minutes}分钟</option>)}
+                  </select>
+                </label>
+                <label>
+                  目标人数
+                  <input type="number" min={1} max={12} value={editor.targetStudentCount || 1} onChange={(e) => setEditor({ ...editor, targetStudentCount: Number(e.target.value) || 1 })} />
+                </label>
+              </div>
               <label>
                 上课类型
                 <select
@@ -739,6 +874,14 @@ export function TeacherPortal({
                 </p>
               ))}
               {editor.originalCourses.length === 0 && <p>暂无原课程</p>}
+
+              <h3>当前班级与已排课程</h3>
+              <p>
+                班级：{state.classes.filter((item) => item.studentIds.includes(editor.id)).map((item) => item.title).join('、') || '暂未加入班级'}
+              </p>
+              {state.teacherCourses.filter((course) => course.status !== 'cancelled' && course.studentIds.includes(editor.id)).map((course) => (
+                <p key={course.id}>{WEEK_LABELS[course.day]} {formatMinute(course.startMinute)}-{formatMinute(course.endMinute)} · {course.title}</p>
+              ))}
 
               <label>
                 备注
@@ -1058,7 +1201,7 @@ export function TeacherPortal({
             <input value={courseDraft.notes} onChange={(e) => setCourseDraft({ ...courseDraft, notes: e.target.value })} />
           </label>
           <div className="actions">
-            <button onClick={submitCourse}>{courseDraft.id ? '更新课程' : '添加课程'}</button>
+            <button disabled={busy} onClick={() => void submitCourse()}>{courseDraft.id ? '更新课程' : '添加课程'}</button>
             {courseDraft.id && (
               <button type="button" onClick={() => setCourseDraft(emptyCourseDraft(state))}>
                 取消编辑
@@ -1288,7 +1431,8 @@ export function TeacherPortal({
                           <input
                             type="number"
                             min={0}
-                            value={found?.minutes ?? 30}
+                            value={found?.minutes ?? ''}
+                            placeholder="未设置"
                             onChange={(e) => setTravelTime(from.id, to.id, { minutes: Number(e.target.value) })}
                           />
                           <input
@@ -1296,7 +1440,8 @@ export function TeacherPortal({
                             type="number"
                             min={0}
                             max={120}
-                            value={found?.bufferMinutes ?? 10}
+                            value={found?.bufferMinutes ?? ''}
+                            placeholder="缓冲"
                             onChange={(e) => setTravelTime(from.id, to.id, { bufferMinutes: Number(e.target.value) })}
                           />
                         </td>
@@ -1307,6 +1452,49 @@ export function TeacherPortal({
               </tbody>
             </table>
           </div>
+        </section>
+      )}
+
+      {tab === 'settings' && (
+        <section className="card">
+          <h2>智能排课参数</h2>
+          <p className="tiny">这些权重直接参与方案评分；硬时间冲突、教师冲突和通勤不可行仍会直接淘汰，不受权重降低影响。</p>
+          <div className="settings-grid">
+            {[
+              ['student_preferred_time', '学生时间偏好'],
+              ['teacher_preferred_time', '教师时间偏好'],
+              ['same_location_cluster', '同地点连续'],
+              ['minimize_travel', '减少通勤'],
+              ['compact_schedule', '课程集中'],
+              ['student_locked_schedule', '保护固定安排'],
+              ['grouping_efficiency', '组班效率'],
+            ].map(([key, label]) => (
+              <label key={key}>
+                {label}
+                <input
+                  type="number"
+                  min={0}
+                  max={200}
+                  value={settingsDraft.weights[key] ?? 50}
+                  onChange={(e) => setSettingsDraft({
+                    ...settingsDraft,
+                    weights: { ...settingsDraft.weights, [key]: Number(e.target.value) || 0 },
+                  })}
+                />
+              </label>
+            ))}
+          </div>
+          <div className="actions">
+            <button disabled={busy} onClick={() => void saveState({ ...state, optimizerSettings: settingsDraft })}>保存排课参数</button>
+          </div>
+          <h3>运行记录</h3>
+          {state.scheduleRuns.length === 0 && <p>尚未运行智能排课。</p>}
+          {state.scheduleRuns.slice(0, 20).map((run) => (
+            <div className="list-item" key={run.id}>
+              <span>{new Date(run.createdAt).toLocaleString()} · {run.algorithmVersion || '未标记版本'}</span>
+              <strong>{run.status || 'generated'} · {run.totalScore == null ? '未评分' : `${Math.round(run.totalScore)}分`}</strong>
+            </div>
+          ))}
         </section>
       )}
     </main>

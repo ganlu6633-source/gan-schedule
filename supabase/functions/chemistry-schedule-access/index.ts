@@ -170,7 +170,7 @@ async function loadProfile(chemStudentId: string) {
   ]);
 
   if (chemResult.error) throw chemResult.error;
-  if (!chemResult.data) throw new RequestError(403, "该学生资料当前不可用，请联系甘老师。");
+  if (!chemResult.data) throw new RequestError(403, "该学生资料当前不可用，请联系排课老师。");
   if (scheduleResult.error) throw scheduleResult.error;
   if (locationsResult.error) throw locationsResult.error;
   if (travelResult.error) throw travelResult.error;
@@ -250,7 +250,7 @@ async function loadProfile(chemStudentId: string) {
 
 async function exchangeCode(req: Request, name: string, code: string) {
   if (!name || name.length > 40 || !/^\d{6,12}$/.test(code)) {
-    throw new RequestError(400, "请输入学生姓名和复习系统的 6-12 位数字登录码。");
+    throw new RequestError(400, "请输入学生姓名和 6-12 位数字登录码。");
   }
 
   const token = randomToken();
@@ -273,7 +273,7 @@ async function exchangeCode(req: Request, name: string, code: string) {
   const access = singleRow(data);
 
   if (error || !access || String(access.access_role) !== "student" || !access.student_id) {
-    throw new RequestError(401, "姓名或登录码不正确，请使用复习系统的同一登录码。");
+    throw new RequestError(401, "姓名或登录码不正确，请确认后重新输入。");
   }
 
   const fullProfile = await loadProfile(String(access.student_id));
@@ -424,7 +424,7 @@ function travelChecks(
           day: day === 6 ? "周六" : "周日",
           fromCourseId: previous.id,
           toCourseId: current.id,
-          message: "两个地点之间暂未配置通勤时间，请甘老师确认。",
+          message: "两个地点之间暂未配置通勤时间，请联系排课老师确认。",
         });
       } else if (gap < required) {
         warnings.push({
@@ -473,7 +473,7 @@ async function submitSchedule(req: Request, payload: DataRow) {
     .filter((item) => item.level !== "ok")
     .map((item) => item.message);
   const notes = [
-    "学生通过复习系统统一登录码提交。",
+    "学生通过统一登录码提交。",
     cleanText(payload.notes, 1000),
     ...issueMessages,
   ].filter(Boolean).join("\n");
@@ -485,7 +485,7 @@ async function submitSchedule(req: Request, payload: DataRow) {
     .maybeSingle();
   if (formResult.error) throw formResult.error;
   if (!formResult.data?.form_key) {
-    throw new RequestError(503, "学生登记表暂未开放，请联系甘老师。");
+    throw new RequestError(503, "学生登记表暂未开放，请联系排课老师。");
   }
 
   const submissionRow = {
@@ -588,4 +588,3 @@ Deno.serve(async (req: Request) => {
     return reply(req, { error: "服务暂时不可用，请稍后重试。" }, 500);
   }
 });
-

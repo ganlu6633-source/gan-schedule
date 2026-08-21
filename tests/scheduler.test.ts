@@ -208,4 +208,19 @@ describe('排课时间与冲突规则', () => {
     expect(suggestions[0].studentIds.sort()).toEqual(['stu-a', 'stu-b']);
     expect(suggestions[0].studentIds).not.toContain('stu-c');
   });
+
+  it('自动组班不会把明确不同课程需求的学生放进同一候选班', () => {
+    const state = makeState();
+    state.students[0] = student('stu-a', { courseNeed: '高中化学' });
+    state.students[1] = student('stu-b', { courseNeed: '初中物理' });
+    expect(generateGroupSuggestions(state)).toHaveLength(0);
+  });
+
+  it('每套方案提供完整可解释评分且硬冲突为零', () => {
+    const proposals = generateProposals(makeState(), ['stu-a', 'stu-b']);
+    expect(proposals.length).toBeGreaterThanOrEqual(3);
+    expect(proposals.every((proposal) => proposal.breakdown.hardConflicts === 0)).toBe(true);
+    expect(proposals.every((proposal) => proposal.breakdown.completenessRate > 0)).toBe(true);
+    expect(new Set(proposals.map((proposal) => proposal.strategy)).size).toBe(4);
+  });
 });

@@ -722,6 +722,19 @@ export async function persistTeacherWorkspace(state: AppState): Promise<AppState
     ensureNoError('保存学生', studentsRes.error);
   }
 
+  if (state.optimizerSettings) {
+    const settingsRes = await client.from('sched_optimizer_settings').upsert(
+      {
+        id: 'default',
+        weights: state.optimizerSettings.weights,
+        rules: state.optimizerSettings.rules,
+        updated_at: nowIso(),
+      },
+      { onConflict: 'id' }
+    );
+    ensureNoError('保存排课参数', settingsRes.error);
+  }
+
   const classes = [...state.classes.map((item) => ({ ...item, studentIds: unique(item.studentIds) }))];
   const classesById = new Map(classes.map((item) => [item.id, item]));
   const courses: TeacherCourse[] = state.teacherCourses.map((course) => {
@@ -808,6 +821,31 @@ export async function persistTeacherWorkspace(state: AppState): Promise<AppState
   return loadTeacherWorkspace();
 }
 
+export async function persistTeacherAvailability(value: Record<string, TeacherTimeStatus>): Promise<void> {
+  if (!client) throw new Error('Supabase 正式环境变量未配置。');
+  const clearResult = await client
+    .from('sched_teacher_availability')
+    .delete()
+    .gte('day_of_week', 1)
+    .lte('day_of_week', 7);
+  ensureNoError('重置教师时间', clearResult.error);
+  const rows = Object.entries(value).map(([key, uiState]) => {
+    const [day, start] = key.split('-').map(Number);
+    return {
+      day_of_week: day,
+      start_minute: start,
+      end_minute: start + SLOT_MINUTES,
+      state: uiState === 'free' ? 'available' : 'unavailable',
+      preference: uiState === 'free' ? 0 : -5,
+      notes: JSON.stringify({ uiState }),
+      updated_at: nowIso(),
+    };
+  });
+  if (!rows.length) throw new Error('保存教师时间失败：时间表为空。');
+  const insertResult = await client.from('sched_teacher_availability').insert(rows);
+  ensureNoError('保存教师时间', insertResult.error);
+}
+
 export async function persistScheduleRun(data: {
   runId?: string;
   algorithmVersion?: string;
@@ -818,10 +856,14 @@ export async function persistScheduleRun(data: {
   if (!client) throw new Error('Supabase 正式环境变量未配置。');
   const payload = safeJsonRecord(data.payload);
   const proposal = asRecord(payload.proposal);
+  const assignment = asRecord(proposal.assignment);
+  const payloadStudentIds = asStringArray(payload.studentIds);
+  const proposalStudentIds = asStringArray(assignment.allStudents);
   const constraints = {
     proposalId: asString(payload.proposalId) || null,
     strategy: asString(proposal.strategy) || null,
-    studentIds: asArray(asRecord(proposal.assignment).allStudents),
+    studentIds: unique([...payloadStudentIds, ...proposalStudentIds]),
+    candidateCount: asArray(proposal.candidates).length || (Object.keys(proposal).length ? 1 : 0),
   };
   const row = {
     algorithm_version: data.algorithmVersion || 'rule-based-v2',

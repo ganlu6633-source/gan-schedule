@@ -281,6 +281,7 @@ export interface ScheduleScoreBreakdown {
 
 export interface ScheduleProposal {
   id: string;
+  runId?: string;
   title: string;
   strategy: '冲突最少' | '学生通勤最少' | '教师最少通勤' | '课程更集中';
   explanation: string;

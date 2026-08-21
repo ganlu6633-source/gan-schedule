@@ -13,10 +13,12 @@ import {
   verifyTeacherWorkspaceAccess,
   loadTeacherWorkspace,
   persistScheduleRun,
+  persistTeacherAvailability,
   markSubmissionStatus,
   persistTeacherWorkspace,
   submitStudentDraft,
 } from './services/scheduleRepository';
+import { generateProposals } from './services/scheduler';
 
 type Route = 'student' | 'teacher';
 
@@ -361,16 +363,19 @@ export default function App() {
       updatedAt: now,
     };
 
-    const runId = await persistScheduleRun({
-      algorithmVersion: 'rule-based-v1',
-      totalScore: proposal.score,
-      status: 'generated',
-      payload: JSON.stringify({
-        proposalId: proposal.id,
-        proposal,
-        generatedAt: now,
-      }),
-    });
+    const runId =
+      proposal.runId ||
+      (await persistScheduleRun({
+        algorithmVersion: 'rule-based-v3',
+        totalScore: proposal.score,
+        status: 'generated',
+        payload: JSON.stringify({
+          proposalId: proposal.id,
+          proposal,
+          studentIds: proposal.assignment.allStudents,
+          generatedAt: now,
+        }),
+      }));
 
     const assignments = proposal.assignments?.length ? proposal.assignments : [proposal.assignment];
     const nextCourses = assignments.map((assignment) => ({
@@ -405,7 +410,7 @@ export default function App() {
     });
     await persistScheduleRun({
       runId,
-      algorithmVersion: 'rule-based-v2',
+      algorithmVersion: 'rule-based-v3',
       totalScore: proposal.score,
       status: 'accepted',
       payload: JSON.stringify({
@@ -422,7 +427,7 @@ export default function App() {
             ...saved.scheduleRuns,
             {
               id: runId,
-              algorithmVersion: 'rule-based-v2',
+              algorithmVersion: 'rule-based-v3',
               totalScore: proposal.score,
               status: 'accepted',
               createdAt: now,
@@ -430,6 +435,52 @@ export default function App() {
           ],
     });
     setFeedback('方案已应用：班级、课程和排课运行记录均已写入云端。');
+  };
+
+  const generateAndPersistProposals = async (studentIds: string[]) => {
+    const candidates = generateProposals(state, studentIds);
+    if (!candidates.length) {
+      setFeedback('当前选择没有满足硬约束的排课方案。');
+      return [];
+    }
+    const now = new Date().toISOString();
+    const runId = await persistScheduleRun({
+      algorithmVersion: 'rule-based-v3',
+      totalScore: Math.max(...candidates.map((proposal) => proposal.score)),
+      status: 'generated',
+      payload: JSON.stringify({
+        proposal: { candidates, studentIds },
+        studentIds,
+        generatedAt: now,
+      }),
+    });
+    const withRun = candidates.map((proposal) => ({ ...proposal, runId }));
+    setState((current) => ({
+      ...current,
+      scheduleRuns: [
+        {
+          id: runId,
+          algorithmVersion: 'rule-based-v3',
+          totalScore: Math.max(...candidates.map((proposal) => proposal.score)),
+          status: 'generated',
+          createdAt: now,
+        },
+        ...current.scheduleRuns.filter((item) => item.id !== runId),
+      ],
+    }));
+    setFeedback(`已生成 ${candidates.length} 套方案，并记录本次排课运行。`);
+    return withRun;
+  };
+
+  const saveTeacherTime = async (availability: AppState['teacherAvailability']) => {
+    try {
+      await persistTeacherAvailability(availability);
+      setState((current) => ({ ...current, teacherAvailability: availability }));
+      setFeedback('教师时间已保存。');
+    } catch (error: any) {
+      setFeedback(`教师时间保存失败：${error?.message || '请检查网络后重试'}`);
+      throw error;
+    }
   };
 
   const ignoreSubmission = async (submissionId: string) => {
@@ -501,6 +552,8 @@ export default function App() {
           state={state}
           onUpdate={persistTeacherResult}
           onApplyProposal={applyProposal}
+          onGenerateProposals={generateAndPersistProposals}
+          onSaveTeacherAvailability={saveTeacherTime}
           onAcceptSubmission={acceptSubmission}
           onMergeSubmission={mergeSubmission}
           onIgnoreSubmission={ignoreSubmission}
