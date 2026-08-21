@@ -110,7 +110,7 @@ export function StudentPortal({
   const authenticate = async () => {
     if (!name.trim() || !/^\d{6,12}$/.test(code)) {
       setMessageType('error');
-      setMessage('请输入学生姓名和复习系统的 6 至 12 位数字登录码。');
+      setMessage('请输入学生姓名和 6 至 12 位数字登录码。');
       return;
     }
     setLoading(true);
@@ -122,7 +122,7 @@ export function StudentPortal({
       setCode('');
       window.sessionStorage.setItem(SESSION_KEY, JSON.stringify(result));
       setMessageType('success');
-      setMessage('身份匹配成功，年级、学校、班级和上课地点已自动读取。');
+      setMessage('登录成功，已加载你的基本资料和可选地点。');
     } catch (error: any) {
       setMessageType('error');
       setMessage(error?.message || '姓名或登录码不正确。');
@@ -196,7 +196,7 @@ export function StudentPortal({
           checks.push({
             id: `${day}-${previous.id}-${next.id}`,
             severity: 'warning',
-            text: `${previousLocation} → ${nextLocation} 尚未配置通勤时间，教师端会收到补充提醒。`,
+            text: `${previousLocation} → ${nextLocation} 暂无通勤时间，请在补充说明中填写，或联系排课老师确认。`,
           });
           continue;
         }
@@ -218,7 +218,7 @@ export function StudentPortal({
     if (!identity) return;
     if (courses.some((course) => !course.locationId || toMinute(course.end) <= toMinute(course.start))) {
       setMessageType('error');
-      setMessage('请为每条已有课程选择地点，并确保结束时间晚于开始时间。');
+      setMessage('请为每条不可排课时间选择地点，并确保结束时间晚于开始时间。');
       return;
     }
     const availability = makeDefaultAvailability();
@@ -251,9 +251,9 @@ export function StudentPortal({
     setLoading(true);
     setMessage('');
     try {
-      const result = await onSubmit(payload, identity.session.token);
+      await onSubmit(payload, identity.session.token);
       setMessageType('success');
-      setMessage(`周末安排已提交，编号：${result.id}。甘老师会在教师端直接看到更新。`);
+      setMessage('排课信息已提交，请等待排课老师确认。');
     } catch (error: any) {
       setMessageType('error');
       setMessage(error?.message || '提交失败，请稍后重试。');
@@ -267,26 +267,26 @@ export function StudentPortal({
     <main className="app-shell student-access-shell">
       <header className="hero student-hero">
         <div>
-          <p>统一学生账号 · 周末排课</p>
-          <h1>确认周六、周日已有课程</h1>
-          <span>年级、学校、班级和甘老师上课地点由系统自动匹配，学生不需要重复填写。</span>
+          <p>智能排课系统 · 学生端</p>
+          <h1>学生排课信息登记</h1>
+          <span>登录后请登记不能排课的时间和地点，系统将据此计算可排时间并检查通勤冲突。</span>
         </div>
-        <div className="weekend-mark" aria-hidden="true"><strong>六</strong><strong>日</strong></div>
+        <div className="weekend-mark" aria-hidden="true"><strong>排</strong><strong>课</strong></div>
       </header>
 
       {message && <p className={`form-message ${messageType}`}>{message}</p>}
 
       {!identity ? (
         <section className="card student-login-card">
-          <div className="section-kicker">和复习系统使用同一个登录码</div>
+          <div className="section-kicker">学生身份验证</div>
           <h2>学生登录</h2>
-          <p className="tiny">这里只验证身份，不需要重新填写年级、学校或班级。</p>
+          <p className="tiny">请输入姓名和登录码，系统会自动加载已经登记的基本资料。</p>
           <label>
             学生姓名
-            <input value={name} onChange={(event) => setName(event.target.value)} placeholder="请输入复习系统中的姓名" autoComplete="name" />
+            <input value={name} onChange={(event) => setName(event.target.value)} placeholder="请输入学生姓名" autoComplete="name" />
           </label>
           <label>
-            复习系统登录码
+            登录码
             <input
               type="password"
               inputMode="numeric"
@@ -298,21 +298,21 @@ export function StudentPortal({
             />
           </label>
           <button disabled={loading || !name.trim() || code.length < 6} onClick={authenticate}>
-            {loading ? '正在匹配学生资料...' : '登录并读取我的资料'}
+            {loading ? '正在登录...' : '登录'}
           </button>
-          <p className="privacy-note">登录码只发送给统一身份服务验证，不会写入排课表或保存在浏览器草稿中。</p>
+          <p className="privacy-note">登录码仅用于身份验证，系统不会保存明文登录码。</p>
         </section>
       ) : (
         <>
           <section className="card matched-profile">
-            <div><div className="section-kicker">已匹配复习系统学生</div><h2>{identity.profile.displayName}</h2></div>
+            <div><div className="section-kicker">学生资料</div><h2>{identity.profile.displayName}</h2></div>
             <button className="secondary-button" onClick={switchStudent}>切换学生</button>
             <div className="profile-facts">
               <div><span>年级</span><strong>{identity.profile.gradeBand || '资料库暂未登记'}</strong></div>
               <div><span>学校 / 班级</span><strong>{identity.profile.schoolClass || identity.profile.school || '资料库暂未登记'}</strong></div>
               <div><span>当前班级</span><strong>{identity.profile.classNames.length ? identity.profile.classNames.join('、') : '尚未正式组班'}</strong></div>
               <div>
-                <span>甘老师上课地点</span>
+                <span>可选上课地点</span>
                 <strong>
                   {identity.profile.acceptedLocationIds.length
                     ? identity.profile.acceptedLocationIds.map((id) => locations.find((item) => item.id === id)?.name).filter(Boolean).join('、')
@@ -324,13 +324,13 @@ export function StudentPortal({
 
           <section className="card">
             <div className="section-heading">
-              <div><div className="section-kicker">只填已经被占用的时间</div><h2>周六、周日已有课程</h2></div>
-              <button className="compact-button" onClick={addCourse}>+ 添加一段已有课程</button>
+              <div><div className="section-kicker">不可排课时间</div><h2>时间与地点登记</h2></div>
+              <button className="compact-button" onClick={addCourse}>+ 添加一段不可排课时间</button>
             </div>
             {!courses.length && (
               <div className="empty-weekend">
-                <strong>目前没有登记其他课程</strong>
-                <p>如果周末完全没有其他课，可以直接提交；有课时再点击上方按钮添加。</p>
+                <strong>目前没有登记不可排课时间</strong>
+                <p>如果周六、周日都可以排课，可以直接提交；有其他安排时再点击上方按钮添加。</p>
               </div>
             )}
             {courses.map((course, index) => (
@@ -392,11 +392,11 @@ export function StudentPortal({
 
           <section className="card submit-weekend-card">
             <label>
-              给甘老师的补充说明（选填）
+              给排课老师的补充说明（选填）
               <textarea rows={3} value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="只写时间或地点需要特别说明的内容" />
             </label>
-            <button disabled={loading} onClick={submit}>{loading ? '正在提交...' : '确认并提交周末安排'}</button>
-            <p className="privacy-note">提交后会自动匹配到你在复习系统中的学生档案，不会创建同名重复学生。</p>
+            <button disabled={loading} onClick={submit}>{loading ? '正在提交...' : '提交排课信息'}</button>
+            <p className="privacy-note">提交后，排课老师会根据你的时间和地点安排课程。</p>
           </section>
         </>
       )}

@@ -3,7 +3,7 @@ import { test, expect } from '@playwright/test';
 test('学生端入口可加载', async ({ page }) => {
   await page.goto('/gan-schedule/');
   await expect(page.getByText('学生入口')).toBeVisible();
-  await expect(page.getByRole('heading', { name: '确认周六、周日已有课程' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: '学生排课信息登记' })).toBeVisible();
   await expect(page.getByRole('heading', { name: '学生登录' })).toBeVisible();
 });
 

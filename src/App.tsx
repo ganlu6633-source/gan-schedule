@@ -260,7 +260,7 @@ export default function App() {
       throw new Error('姓名和年级为必填项');
     }
     const result = await submitStudentDraft(payload, sessionToken);
-    setFeedback('学生提交已成功写入云端，教师将在待处理提交中看到这条记录。');
+    setFeedback('排课信息提交成功。');
     return result;
   };
 
